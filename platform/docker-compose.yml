@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: unific_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: unific
+      POSTGRES_PASSWORD: unific_dev_password
+      POSTGRES_DB: unific_platform
+    ports:
+      - "55432:5432"
+    volumes:
+      - unific_pgdata:/var/lib/postgresql/data
+
+volumes:
+  unific_pgdata:
