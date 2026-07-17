@@ -20,25 +20,11 @@ class StaffCreateRequest(BaseModel):
     full_name: str = Field(min_length=1, max_length=255)
 
 
-class RoomAccessGrantRequest(BaseModel):
-    room: str
-    permission: str = "read"
-
-
-class RoomAccessOut(BaseModel):
-    room: str
-    permission: str
-
-    model_config = {"from_attributes": True}
-
-
 class StaffOut(BaseModel):
     id: str
     email: str
     full_name: str
     is_active: bool
-    is_superadmin: bool
-    room_access: list[RoomAccessOut] = []
 
     model_config = {"from_attributes": True}
 

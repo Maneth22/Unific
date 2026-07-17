@@ -1,6 +1,13 @@
 """Auth dependencies for staff (master dashboard) routes. Client-scoped
-dependencies (`require_identity_scope`) are added in `app.profiles.security`
-once the identity tree exists (Phase C) — they follow the same shape.
+dependencies (`require_identity_scope`) live in `app.profiles.security`.
+
+There is no per-room grant model — every active staff account is a full
+Admin. `require_admin` is the single server-side gate every accounts/
+profiles/meeting-room staff route depends on (the UI showing/hiding a nav
+item is not access control, this dependency is); it used to be
+`require_room_access(room, minimum)` checking a `StaffRoomAccess` row, but
+that per-room grant table was removed when staff roles were collapsed to
+one Admin role.
 """
 from __future__ import annotations
 
@@ -9,14 +16,11 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.models.common import RoomName, RoomPermission
-from app.core.models.staff import StaffRoomAccess, StaffUser
+from app.core.models.staff import StaffUser
 from app.core.security.jwt import decode_access_token
 from app.database import get_db
 
 _bearer = HTTPBearer(auto_error=False)
-
-_PERMISSION_RANK = {RoomPermission.read: 0, RoomPermission.write: 1, RoomPermission.admin: 2}
 
 
 async def get_current_staff_user(
@@ -38,36 +42,11 @@ async def get_current_staff_user(
     return staff_user
 
 
-def require_room_access(room: RoomName, minimum: RoomPermission = RoomPermission.read):
-    """Enforces the master-dashboard grant model server-side: a staff user
-    must hold an explicit `StaffRoomAccess` row for `room` at or above
-    `minimum`, unless they are superadmin. This is the check every
-    accounts/profiles/meeting-room staff route depends on — the UI hiding
-    a nav item is not access control, this dependency is.
-    """
-
-    async def checker(
-        current_staff: StaffUser = Depends(get_current_staff_user),
-        db: AsyncSession = Depends(get_db),
-    ) -> StaffUser:
-        if current_staff.is_superadmin:
-            return current_staff
-
-        result = await db.execute(
-            select(StaffRoomAccess).where(
-                StaffRoomAccess.staff_user_id == current_staff.id,
-                StaffRoomAccess.room == room,
-            )
-        )
-        access = result.scalar_one_or_none()
-        if access is None or _PERMISSION_RANK[access.permission] < _PERMISSION_RANK[minimum]:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Requires '{minimum.value}' access to room '{room.value}'",
-            )
-        return current_staff
-
-    return checker
+async def require_admin(current_staff: StaffUser = Depends(get_current_staff_user)) -> StaffUser:
+    """Named wrapper around `get_current_staff_user` so router code reads
+    self-documenting (`Depends(require_admin)`) rather than depending on
+    the generic accessor directly. Any active staff account passes."""
+    return current_staff
 
 
 def client_ip(request: Request) -> str:

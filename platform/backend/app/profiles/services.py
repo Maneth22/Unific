@@ -11,20 +11,25 @@ allows.
 """
 from __future__ import annotations
 
+import secrets
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.models.audit import ActorType
+from app.core.models.client import ClientRegistrationRequest, ClientRegistrationStatus, ClientUser
 from app.core.models.common import RoomName, utcnow
 from app.core.models.ledger import LedgerEntry, LedgerEntryType
+from app.core.security.password import hash_password
 from app.core.services import audit_service, scope_service
 from app.profiles.models import (
     ConsentContext,
     ConsentRecord,
+    GroupInvite,
     Identity,
     IdentityType,
+    MemberProfile,
     Permission,
     PermissionScope,
     ProfileAccount,
@@ -135,8 +140,14 @@ async def create_identity(
     name: str,
     id_type: IdentityType,
     parent_id: str | None,
-    staff_id: str,
+    actor_type: ActorType,
+    actor_id: str | None,
 ) -> Identity:
+    """The one identity-creation path, used by staff creating any node,
+    clients creating a community Group under their own scope, and the
+    public member-registration endpoint (`actor_type=system`, `actor_id
+    =None`) creating a Member. `actor_type` decides which creator column
+    gets stamped — see `Identity`'s docstring."""
     parent: Identity | None = None
     if parent_id is not None:
         parent = await db.get(Identity, parent_id)
@@ -147,7 +158,14 @@ async def create_identity(
     elif id_type == IdentityType.member:
         raise ProfilesError("A root identity must be a Group ID")
 
-    identity = Identity(name=name, id_type=id_type, parent_id=parent_id, path="", created_by=staff_id)
+    identity = Identity(
+        name=name,
+        id_type=id_type,
+        parent_id=parent_id,
+        path="",
+        created_by=actor_id if actor_type == ActorType.staff else None,
+        created_by_client_id=actor_id if actor_type == ActorType.client else None,
+    )
     db.add(identity)
     await db.flush()  # assigns identity.id
     identity.path = scope_service.child_path(parent.path if parent else None, identity.id)
@@ -163,8 +181,8 @@ async def create_identity(
 
     await audit_service.record(
         db,
-        actor_type=ActorType.staff,
-        actor_id=staff_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
         action="profiles.identity.create",
         room=RoomName.profiles,
         entity_type="identity",
@@ -392,3 +410,243 @@ async def list_consent(db: AsyncSession, identity_id: str) -> list[ConsentRecord
         select(ConsentRecord).where(ConsentRecord.identity_id == identity_id).order_by(ConsentRecord.granted_at.desc())
     )
     return list(result.scalars().all())
+
+
+# --- Community groups & registration invites ---
+
+async def create_or_rotate_group_invite(
+    db: AsyncSession, *, identity_id: str, actor_type: ActorType, actor_id: str | None
+) -> GroupInvite:
+    """Deactivates any current active invite for this group and inserts a
+    fresh one — regenerate-not-mutate, so a leaked old link goes cold and
+    the full history of tokens ever issued survives."""
+    identity = await db.get(Identity, identity_id)
+    if identity is None:
+        raise ProfilesError("Identity not found")
+    if identity.id_type != IdentityType.group:
+        raise ProfilesError("Only a Group identity can have a registration invite")
+
+    current = await get_active_invite(db, identity_id)
+    if current is not None:
+        current.is_active = False
+        await db.flush()
+
+    invite = GroupInvite(
+        identity_id=identity_id,
+        token=secrets.token_urlsafe(24),
+        created_by_client_id=actor_id if actor_type == ActorType.client else None,
+        created_by_staff_id=actor_id if actor_type == ActorType.staff else None,
+    )
+    db.add(invite)
+    await db.flush()
+
+    await audit_service.record(
+        db,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        action="profiles.group_invite.create",
+        room=RoomName.profiles,
+        entity_type="group_invite",
+        entity_id=invite.id,
+        after={"identity_id": identity_id},
+    )
+    return invite
+
+
+async def get_active_invite(db: AsyncSession, identity_id: str) -> GroupInvite | None:
+    result = await db.execute(
+        select(GroupInvite).where(GroupInvite.identity_id == identity_id, GroupInvite.is_active.is_(True))
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_invite_by_token(db: AsyncSession, token: str) -> GroupInvite | None:
+    result = await db.execute(select(GroupInvite).where(GroupInvite.token == token, GroupInvite.is_active.is_(True)))
+    invite = result.scalar_one_or_none()
+    if invite is None:
+        return None
+    identity = await db.get(Identity, invite.identity_id)
+    if identity is None or not identity.is_active:
+        return None
+    return invite
+
+
+async def create_member_profile(
+    db: AsyncSession,
+    *,
+    identity_id: str,
+    email: str,
+    phone_number: str,
+    extra_info: dict,
+    source_invite_id: str | None,
+) -> MemberProfile:
+    profile = MemberProfile(
+        identity_id=identity_id,
+        email=email,
+        phone_number=phone_number,
+        extra_info=extra_info,
+        registered_via="public_form",
+        source_invite_id=source_invite_id,
+    )
+    db.add(profile)
+    await db.flush()
+    return profile
+
+
+async def get_member_profile(db: AsyncSession, identity_id: str) -> MemberProfile | None:
+    return await db.get(MemberProfile, identity_id)
+
+
+async def list_members(db: AsyncSession, group_id: str) -> list[Identity]:
+    """A group's members are always its direct children (a Member is
+    always a leaf, created directly under the group it registered into),
+    so this is a parent_id filter, not a descendant-tree walk."""
+    result = await db.execute(
+        select(Identity)
+        .where(Identity.parent_id == group_id, Identity.id_type == IdentityType.member)
+        .order_by(Identity.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def list_client_groups(db: AsyncSession, client_identity_id: str) -> list[Identity]:
+    """The client's own community groups — every Group identity in their
+    subtree, excluding their own root (that's "your organization", not a
+    community they created)."""
+    ids = await scope_service.descendant_ids(db, client_identity_id, include_self=False)
+    if not ids:
+        return []
+    result = await db.execute(
+        select(Identity)
+        .where(Identity.id.in_(ids), Identity.id_type == IdentityType.group)
+        .order_by(Identity.path)
+    )
+    return list(result.scalars().all())
+
+
+# --- Client self-registration & admin approval ---
+
+async def submit_client_registration(
+    db: AsyncSession, *, org_name: str, contact_name: str, email: str, password: str
+) -> ClientRegistrationRequest:
+    normalized_email = email.lower()
+
+    existing_user = await db.execute(select(ClientUser).where(ClientUser.email == normalized_email))
+    if existing_user.scalar_one_or_none() is not None:
+        raise ProfilesError("Email already registered")
+
+    existing_pending = await db.execute(
+        select(ClientRegistrationRequest).where(
+            ClientRegistrationRequest.email == normalized_email,
+            ClientRegistrationRequest.status == ClientRegistrationStatus.pending,
+        )
+    )
+    if existing_pending.scalar_one_or_none() is not None:
+        raise ProfilesError("A registration request for this email is already pending")
+
+    request = ClientRegistrationRequest(
+        org_name=org_name,
+        contact_name=contact_name,
+        email=normalized_email,
+        password_hash=hash_password(password),
+    )
+    db.add(request)
+    await db.flush()
+
+    await audit_service.record(
+        db,
+        actor_type=ActorType.system,
+        actor_id=None,
+        action="profiles.client_registration.submit",
+        room=RoomName.profiles,
+        entity_type="client_registration_request",
+        entity_id=request.id,
+        after={"org_name": org_name, "email": normalized_email},
+    )
+    return request
+
+
+async def list_registration_requests(
+    db: AsyncSession, *, status: ClientRegistrationStatus | None = None
+) -> list[ClientRegistrationRequest]:
+    query = select(ClientRegistrationRequest).order_by(ClientRegistrationRequest.created_at.desc())
+    if status is not None:
+        query = query.where(ClientRegistrationRequest.status == status)
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+async def approve_client_registration(db: AsyncSession, request_id: str, *, actor_id: str) -> ClientUser:
+    request = await db.get(ClientRegistrationRequest, request_id)
+    if request is None:
+        raise ProfilesError("Registration request not found")
+    if request.status != ClientRegistrationStatus.pending:
+        raise ProfilesError(f"Request is already {request.status.value}")
+
+    existing_user = await db.execute(select(ClientUser).where(ClientUser.email == request.email))
+    if existing_user.scalar_one_or_none() is not None:
+        raise ProfilesError("Email already registered")
+
+    root_group = await create_identity(
+        db,
+        name=request.org_name,
+        id_type=IdentityType.group,
+        parent_id=None,
+        actor_type=ActorType.staff,
+        actor_id=actor_id,
+    )
+
+    client = ClientUser(
+        email=request.email,
+        password_hash=request.password_hash,
+        full_name=request.contact_name,
+        identity_id=root_group.id,
+    )
+    db.add(client)
+    await db.flush()
+
+    request.status = ClientRegistrationStatus.approved
+    request.reviewed_by = actor_id
+    request.reviewed_at = utcnow()
+    request.created_client_user_id = client.id
+    await db.flush()
+
+    await audit_service.record(
+        db,
+        actor_type=ActorType.staff,
+        actor_id=actor_id,
+        action="profiles.client_registration.approve",
+        room=RoomName.profiles,
+        entity_type="client_registration_request",
+        entity_id=request.id,
+        after={"client_user_id": client.id, "identity_id": root_group.id},
+    )
+    return client
+
+
+async def reject_client_registration(
+    db: AsyncSession, request_id: str, *, actor_id: str, reason: str = ""
+) -> ClientRegistrationRequest:
+    request = await db.get(ClientRegistrationRequest, request_id)
+    if request is None:
+        raise ProfilesError("Registration request not found")
+    if request.status != ClientRegistrationStatus.pending:
+        raise ProfilesError(f"Request is already {request.status.value}")
+
+    request.status = ClientRegistrationStatus.rejected
+    request.rejection_reason = reason
+    request.reviewed_by = actor_id
+    request.reviewed_at = utcnow()
+    await db.flush()
+
+    await audit_service.record(
+        db,
+        actor_type=ActorType.staff,
+        actor_id=actor_id,
+        action="profiles.client_registration.reject",
+        room=RoomName.profiles,
+        entity_type="client_registration_request",
+        entity_id=request.id,
+        after={"reason": reason},
+    )
+    return request

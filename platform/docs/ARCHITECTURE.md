@@ -98,13 +98,102 @@ effective value wider than the parent allows. A future room reading
 permissions should always read `effective_*`, never attempt to walk
 ancestors itself.
 
+## Client onboarding & community registration (Task 2, client-facing)
+
+Four flows sit on top of the identity tree, all added after the initial
+three-room build. None of this touches messaging/group-chat mechanics —
+"community" here is purely a `profiles.identity` grouping concept. Each
+member created by these flows still gets the same individual 1:1
+`meeting_room.Conversation` every identity has always gotten; there is no
+group-chat construct anywhere in this section (see "What's paused" below).
+
+1. **Client self-registration + Admin approval.** A prospective client
+   (e.g. LandChange) submits `POST /api/profiles/public/client-signup`
+   (unauthenticated — org name, contact name, email, password) which
+   stages a `core.client_registration_request` row (`status=pending`).
+   `ClientUser.identity_id` is `NOT NULL` and read as non-optional
+   everywhere (`require_identity_scope`, every client route), so a
+   signup can't become a real login until it has an identity — hence the
+   staging table rather than a half-formed `ClientUser`. An Admin reviews
+   the queue (`GET/POST /api/profiles/registration-requests`); approving
+   one (`app.profiles.services.approve_client_registration`) atomically
+   creates a new root Group `Identity` (named after `org_name`) via the
+   same `create_identity` every other identity goes through, then creates
+   the real `ClientUser` bound to it and activates the login — one step,
+   not two separate admin actions.
+
+2. **Client-created community groups.** Once logged in, a client creates
+   child Group identities under their own subtree —
+   `POST /api/profiles/client/communities` — scope-checked the same way
+   every other client-facing identity write is
+   (`require_identity_scope`/`scope_service.is_ancestor_or_self`).
+   `create_identity` itself no longer hardcodes `staff_id`; like
+   `update_own_permission`/`fund_identity`/`transfer_credit` before it, it
+   now takes the generic `actor_type`/`actor_id` keyword pair, so both
+   staff and client (and the public flow below, as `ActorType.system`)
+   share one creation path. **A newly created client group is opened for
+   auto-reply on creation** (`own_connected=True`, `own_auto_respond=True`
+   set immediately after creation) — every other new identity inherits
+   `connected=False` by default (closed until someone opens it), but that
+   default would silently leave every member who self-registers under a
+   brand-new community unable to get a reply until a human manually
+   flipped those two flags, which defeats the entire point of flow 3
+   below. This is a deliberate, narrow exception to the closed-by-default
+   posture, made only for client-created groups, not a general relaxation.
+
+3. **Group registration invites.** `profiles.group_invite` is a public,
+   revocable link (`secrets.token_urlsafe`) targeting one Group identity;
+   at most one row may be `is_active` per group (DB-enforced via a
+   partial unique index) — regenerating deactivates the current row and
+   inserts a new one rather than mutating the token in place, so a leaked
+   old link goes cold and the full history of tokens issued survives.
+   Created automatically alongside a new community group, and
+   regenerable via `POST .../communities/{id}/invite/regenerate`.
+
+4. **Public community-member registration.** A member visits
+   `/register/<token>` (frontend) → `GET /api/profiles/public/invite/{token}`
+   (backend, unauthenticated) to see which group/org they're joining, then
+   `POST /api/profiles/public/invite/{token}/register` (name, email,
+   mobile, free-form `extra_info`) creates, in one transaction: a Member
+   `Identity` under the invite's group (`actor_type=system`), a
+   `profiles.member_profile` row (the descriptive record — deliberately
+   duplicates `phone_number` with `meeting_room.WhatsAppLink`, which stays
+   the operational routing record the message pipeline actually reads,
+   same "no cross-schema back-reference" style used elsewhere), the
+   `WhatsAppLink` itself (via `meeting_room.services.link_phone_number`,
+   called directly from the `profiles` router — routers cross room
+   boundaries, services don't, matching the existing convention), and a
+   `ConsentRecord` (`context=onboarding`, self-submitted). This
+   orchestration lives in `app/profiles/router.py`, not
+   `profiles/services.py`, specifically to avoid introducing a
+   `profiles → meeting_room` service-layer dependency that doesn't exist
+   today (today only `meeting_room → profiles` does). Registration is
+   **instant, no review** — the response is a `wa.me` click-to-chat deep
+   link (`settings.whatsapp_agent_display_number` +
+   `settings.whatsapp_invite_prefill_template`) the frontend hard-redirects
+   the browser to immediately.
+
+**What's paused**: a client selecting multiple members from a community
+and starting one shared "meeting room" WhatsApp group session (real-time
+fan-out translation, group transcript) is explicitly *not* built by any of
+the above — the WhatsApp Cloud API has no native group-messaging support,
+and the simulated-fan-out alternative needs a decision before it's built.
+`meeting_room.Meeting` remains the same disconnected calendar stub it was
+before this section existed.
+
 ## Security boundaries that must hold for any new room
 
-- **Staff (master dashboard):** gate every route with
+- **Staff (master dashboard):** every staff account is a full Admin —
+  there is no per-room grant model any more (the previous
   `require_room_access(RoomName.<room>, RoomPermission.<read|write|admin>)`
-  from `app.core.security.dependencies`. A staff member's access is an
-  explicit `core.staff_room_access` grant, checked server-side on every
-  request — never assume the frontend hid a nav item.
+  / `core.staff_room_access` grant table were removed by deliberate
+  choice). Gate every staff route with `require_admin` from
+  `app.core.security.dependencies` — any active staff account passes,
+  checked server-side on every request, never assume the frontend hid a
+  nav item. One consequence worth calling out explicitly: the Accounts
+  room's `reveal_secret` (see Secrets below) used to require the
+  stricter `RoomPermission.admin` tier specifically; it now only requires
+  "is an active staff member," same as every other staff route.
 - **Client (group-ID dashboard):** gate with
   `app.profiles.security.require_identity_scope()`, which checks the
   target identity is the client's own root or a descendant of it via
@@ -118,13 +207,15 @@ ancestors itself.
   (this was a real bug caught and fixed during Task 2's build; see the
   `actor_type`/`actor_id` keyword-only parameters on
   `app.profiles.services.update_own_permission` / `fund_identity` /
-  `transfer_credit` as the pattern to copy).
+  `transfer_credit` / `create_identity` as the pattern to copy).
 - **Secrets** (`accounts.account_registry_entry.secret_ciphertext`) are
   Fernet-encrypted and only ever decrypted through
-  `app.accounts.services.reveal_secret`, which requires `RoomPermission.admin`
-  (not just `write`) and always audit-logs, success or failure. No future
-  room should read a raw secret value directly, and no secret should ever
-  be assembled into a payload sent to a provider/LLM call.
+  `app.accounts.services.reveal_secret`, which requires an active staff
+  (Admin) account — there is no stricter room-level tier above that any
+  more, see the staff bullet above — and always audit-logs, success or
+  failure. No future room should read a raw secret value directly, and no
+  secret should ever be assembled into a payload sent to a provider/LLM
+  call.
 
 ## Provider interfaces (Tasks 6-7 will need the same shape)
 
@@ -177,6 +268,16 @@ satisfaction analysis — one provider, five actions, selected via
 - `generate_session_report` / `generate_satisfaction_analysis` — full
   transcript (raw + clarifications + tone insights) → stored
   `meeting_room.session_report` rows the client can revisit for free.
+- `generate_member_summary` — same transcript input as the two above, but
+  framed as an ongoing community-member profile rather than a single
+  session's recap; surfaced on the client dashboard's Profiles tab
+  (community roster) via `report_type=member_summary` on the same
+  generic report endpoints. `generate_report`'s dispatch
+  (`meeting_room/services.py`) is an explicit three-way branch on
+  `ReportType`, not an `if/else` — a two-way `if session_summary: ... else:
+  satisfaction`, which is what it was before this action existed, would
+  have silently routed `member_summary` into the satisfaction-analysis
+  agent instead of raising or doing the right thing.
 
 Room configuration lives on `meeting_room.conversation`
 (`target_language`/`tone`/`character_name`/`character_role`), set by

@@ -169,3 +169,11 @@ class CommsAgent(ABC):
     ) -> dict:
         """Full transcript -> community satisfaction JSON (level, score, trend,
         positives/concerns/unmet needs/recommendations)."""
+
+    @abstractmethod
+    async def generate_member_summary(
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+    ) -> dict:
+        """Full transcript -> a community member's ongoing profile summary
+        for the client dashboard's community roster — framed as "who this
+        person is and what they need," not a single session's recap."""

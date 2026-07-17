@@ -1,18 +1,28 @@
-"""Task 2 — Profiles room API. Staff routes are gated by
-`require_room_access(RoomName.profiles, ...)`; client routes are gated by
-`require_identity_scope()`, which enforces the ancestor-path check on
-every request regardless of what the client dashboard's UI shows.
+"""Task 2 — Profiles room API. Staff routes are gated by `require_admin`;
+client routes are gated by `require_identity_scope()`, which enforces the
+ancestor-path check on every request regardless of what the client
+dashboard's UI shows.
+
+This module also mounts `public_router` — unauthenticated routes for
+client (organisation) self-registration and public community-member
+registration. This is the second and third place in the codebase with no
+auth dependency at all (the first is the Meeting Room's inbound WhatsApp
+webhook) — treat every field from these routes as untrusted input.
 """
 from __future__ import annotations
+
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.models.audit import ActorType
-from app.core.models.common import RoomName, RoomPermission
+from app.core.models.client import ClientRegistrationStatus, ClientUser
+from app.core.models.common import RoomName
 from app.core.models.staff import RefreshToken, StaffUser
 from app.core.security.cookies import CLIENT_COOKIE_PATH, REFRESH_COOKIE_NAME, clear_refresh_cookie, set_refresh_cookie
-from app.core.security.dependencies import client_ip, require_room_access
+from app.core.security.dependencies import client_ip, require_admin
 from app.core.security.password import hash_password, verify_password
 from app.core.security.rate_limit import is_locked_out, record_login_attempt
 from app.core.security.tokens import hash_refresh_token
@@ -24,26 +34,23 @@ from app.profiles.models import ConsentContext, Identity, IdentityType, Permissi
 from app.profiles.security import get_current_client_user, require_identity_scope
 from sqlalchemy import select
 
-from app.core.models.client import ClientUser
-
 router = APIRouter(prefix="/api/profiles", tags=["profiles"])
 
-read_access = require_room_access(RoomName.profiles, RoomPermission.read)
-write_access = require_room_access(RoomName.profiles, RoomPermission.write)
+admin = require_admin
 identity_scope = require_identity_scope()
 
 
 # ============================= Staff routes =============================
 
 @router.get("/identities", response_model=list[schemas.IdentityOut])
-async def list_identities(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_identities(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.list_tree(db)
 
 
 @router.post("/identities", response_model=schemas.IdentityOut, status_code=status.HTTP_201_CREATED)
 async def create_identity(
     req: schemas.IdentityCreate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -52,7 +59,10 @@ async def create_identity(
         raise HTTPException(status_code=400, detail=f"Invalid id_type: {req.id_type}") from exc
 
     try:
-        identity = await services.create_identity(db, name=req.name, id_type=id_type, parent_id=req.parent_id, staff_id=staff.id)
+        identity = await services.create_identity(
+            db, name=req.name, id_type=id_type, parent_id=req.parent_id,
+            actor_type=ActorType.staff, actor_id=staff.id,
+        )
     except services.ProfilesError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
@@ -60,7 +70,7 @@ async def create_identity(
 
 
 @router.get("/identities/{identity_id}", response_model=schemas.IdentityOut)
-async def get_identity(identity_id: str, staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def get_identity(identity_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     identity = await services.get_identity(db, identity_id)
     if identity is None:
         raise HTTPException(status_code=404, detail="Identity not found")
@@ -71,7 +81,7 @@ async def get_identity(identity_id: str, staff: StaffUser = Depends(read_access)
 async def move_subtree(
     identity_id: str,
     req: schemas.MoveSubtreeRequest,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -83,7 +93,7 @@ async def move_subtree(
 
 
 @router.get("/identities/{identity_id}/permission", response_model=schemas.PermissionOut)
-async def get_permission(identity_id: str, staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def get_permission(identity_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     perm = await db.get(Permission, identity_id)
     if perm is None:
         raise HTTPException(status_code=404, detail="Identity not found")
@@ -94,7 +104,7 @@ async def get_permission(identity_id: str, staff: StaffUser = Depends(read_acces
 async def update_permission(
     identity_id: str,
     req: schemas.OwnPermissionUpdate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     fields = req.model_dump(exclude_none=True)
@@ -114,7 +124,7 @@ async def update_permission(
 
 
 @router.get("/identities/{identity_id}/account", response_model=schemas.ProfileAccountOut)
-async def get_account(identity_id: str, staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def get_account(identity_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     account = await db.get(ProfileAccount, identity_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Identity not found")
@@ -125,7 +135,7 @@ async def get_account(identity_id: str, staff: StaffUser = Depends(read_access),
 async def fund_account(
     identity_id: str,
     req: schemas.FundRequest,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -142,7 +152,7 @@ async def fund_account(
 async def transfer_credit(
     identity_id: str,
     req: schemas.TransferRequest,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -164,7 +174,7 @@ async def transfer_credit(
 async def create_client_account(
     identity_id: str,
     req: schemas.ClientAccountCreate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Provisions the client-dashboard login for a group ID. Not open
@@ -201,7 +211,7 @@ async def create_client_account(
 
 
 @router.get("/identities/{identity_id}/consent", response_model=list[schemas.ConsentOut])
-async def list_consent(identity_id: str, staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_consent(identity_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.list_consent(db, identity_id)
 
 
@@ -209,7 +219,7 @@ async def list_consent(identity_id: str, staff: StaffUser = Depends(read_access)
 async def record_consent(
     identity_id: str,
     req: schemas.ConsentCreate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -232,8 +242,52 @@ async def record_consent(
 
 
 @router.get("/identities/{identity_id}/ai-usage", response_model=schemas.AiUsageDetailOut)
-async def get_identity_ai_usage(identity_id: str, staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def get_identity_ai_usage(identity_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await llm_usage_service.get_usage_for_identity(db, identity_id)
+
+
+# --- Client registration requests (Admin review queue) ---
+
+@router.get("/registration-requests", response_model=list[schemas.RegistrationRequestOut])
+async def list_registration_requests(
+    status_filter: str | None = None,
+    staff: StaffUser = Depends(admin),
+    db: AsyncSession = Depends(get_db),
+):
+    parsed_status = None
+    if status_filter:
+        try:
+            parsed_status = ClientRegistrationStatus(status_filter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status_filter}") from exc
+    return await services.list_registration_requests(db, status=parsed_status)
+
+
+@router.post("/registration-requests/{request_id}/approve", response_model=schemas.ClientOut)
+async def approve_registration_request(
+    request_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)
+):
+    try:
+        client = await services.approve_client_registration(db, request_id, actor_id=staff.id)
+    except services.ProfilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return client
+
+
+@router.post("/registration-requests/{request_id}/reject", response_model=schemas.RegistrationRequestOut)
+async def reject_registration_request(
+    request_id: str,
+    req: schemas.RegistrationRejectRequest,
+    staff: StaffUser = Depends(admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        request = await services.reject_client_registration(db, request_id, actor_id=staff.id, reason=req.reason)
+    except services.ProfilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return request
 
 
 def _parse_scope(value: str) -> PermissionScope:
@@ -499,3 +553,189 @@ async def client_transfer_credit(
     except services.ProfilesError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
+
+
+# ==================== Client communities (the "Profiles" tab) ====================
+
+def _invite_url(token: str) -> str:
+    return f"{settings.frontend_base_url.rstrip('/')}/register/{token}"
+
+
+def _invite_out(invite) -> schemas.GroupInviteOut:
+    return schemas.GroupInviteOut(
+        id=invite.id,
+        identity_id=invite.identity_id,
+        token=invite.token,
+        invite_url=_invite_url(invite.token),
+        is_active=invite.is_active,
+        created_at=invite.created_at,
+    )
+
+
+@client_router.post("/communities", response_model=schemas.CommunityOut, status_code=status.HTTP_201_CREATED)
+async def client_create_community(
+    req: schemas.GroupCreateRequest,
+    client: ClientUser = Depends(get_current_client_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """A client builds a community group (e.g. "Sandahkal Group India")
+    under their own scope. The group is opened for auto-reply on creation
+    (`own_connected`/`own_auto_respond=True`) — every new Identity
+    otherwise inherits `connected=False`, and the entire point of the
+    public registration flow below is that a member who fills the form
+    can talk to the agent immediately, with no separate manual step to
+    open the group first."""
+    await identity_scope(identity_id=req.parent_id, client=client, db=db)
+    try:
+        group = await services.create_identity(
+            db, name=req.name, id_type=IdentityType.group, parent_id=req.parent_id,
+            actor_type=ActorType.client, actor_id=client.id,
+        )
+        await services.update_own_permission(
+            db, group.id, actor_type=ActorType.client, actor_id=client.id,
+            own_connected=True, own_auto_respond=True,
+        )
+        invite = await services.create_or_rotate_group_invite(
+            db, identity_id=group.id, actor_type=ActorType.client, actor_id=client.id
+        )
+    except services.ProfilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return schemas.CommunityOut(
+        id=group.id, name=group.name, parent_id=group.parent_id, is_active=group.is_active,
+        created_at=group.created_at, member_count=0, invite=_invite_out(invite),
+    )
+
+
+@client_router.get("/communities", response_model=list[schemas.CommunityOut])
+async def client_list_communities(client: ClientUser = Depends(get_current_client_user), db: AsyncSession = Depends(get_db)):
+    groups = await services.list_client_groups(db, client.identity_id)
+    out = []
+    for group in groups:
+        members = await services.list_members(db, group.id)
+        invite = await services.get_active_invite(db, group.id)
+        out.append(
+            schemas.CommunityOut(
+                id=group.id, name=group.name, parent_id=group.parent_id, is_active=group.is_active,
+                created_at=group.created_at, member_count=len(members),
+                invite=_invite_out(invite) if invite else None,
+            )
+        )
+    return out
+
+
+@client_router.get("/communities/{group_id}/members", response_model=list[schemas.CommunityMemberOut])
+async def client_list_community_members(
+    group_id: str, client: ClientUser = Depends(get_current_client_user), db: AsyncSession = Depends(get_db)
+):
+    from app.meeting_room.models import Conversation, ConversationStatus
+
+    await identity_scope(identity_id=group_id, client=client, db=db)
+    members = await services.list_members(db, group_id)
+    out = []
+    for member in members:
+        profile = await services.get_member_profile(db, member.id)
+        convo_result = await db.execute(
+            select(Conversation.id).where(
+                Conversation.identity_id == member.id, Conversation.status == ConversationStatus.active
+            )
+        )
+        conversation_id = convo_result.scalar_one_or_none()
+        out.append(
+            schemas.CommunityMemberOut(
+                id=member.id, name=member.name, is_active=member.is_active, created_at=member.created_at,
+                profile=schemas.MemberProfileOut.model_validate(profile) if profile else None,
+                conversation_id=conversation_id,
+            )
+        )
+    return out
+
+
+@client_router.post("/communities/{group_id}/invite/regenerate", response_model=schemas.GroupInviteOut)
+async def client_regenerate_invite(
+    group_id: str, client: ClientUser = Depends(get_current_client_user), db: AsyncSession = Depends(get_db)
+):
+    await identity_scope(identity_id=group_id, client=client, db=db)
+    try:
+        invite = await services.create_or_rotate_group_invite(
+            db, identity_id=group_id, actor_type=ActorType.client, actor_id=client.id
+        )
+    except services.ProfilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return _invite_out(invite)
+
+
+# ============================= Public routes =============================
+# No auth dependency anywhere in this router — see the module docstring.
+
+public_router = APIRouter(prefix="/api/profiles/public", tags=["profiles:public"])
+
+
+@public_router.post("/client-signup", response_model=schemas.ClientSignupOut, status_code=status.HTTP_201_CREATED)
+async def public_client_signup(req: schemas.ClientSignupRequest, db: AsyncSession = Depends(get_db)):
+    try:
+        request = await services.submit_client_registration(
+            db, org_name=req.org_name, contact_name=req.contact_name, email=req.email, password=req.password
+        )
+    except services.ProfilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return schemas.ClientSignupOut(id=request.id, status=request.status.value)
+
+
+@public_router.get("/invite/{token}", response_model=schemas.PublicGroupInfoOut)
+async def public_get_invite(token: str, db: AsyncSession = Depends(get_db)):
+    invite = await services.get_invite_by_token(db, token)
+    if invite is None:
+        raise HTTPException(status_code=404, detail="This registration link is invalid or has expired")
+    group = await services.get_identity(db, invite.identity_id)
+
+    # Walk to the tree root to show the org name alongside the group name.
+    root = group
+    while root.parent_id is not None:
+        root = await services.get_identity(db, root.parent_id)
+
+    return schemas.PublicGroupInfoOut(group_name=group.name, org_name=root.name)
+
+
+@public_router.post("/invite/{token}/register", response_model=schemas.MemberRegistrationResponse)
+async def public_register_member(token: str, req: schemas.MemberRegistrationRequest, db: AsyncSession = Depends(get_db)):
+    """Orchestrates across profiles + meeting_room in the router, not the
+    service layer — matching the existing convention that routers, not
+    services, cross room boundaries (meeting_room/router.py already calls
+    into profiles.services directly; nothing in profiles.services imports
+    meeting_room). Instant, no review: the member is fully active the
+    moment this returns."""
+    from app.meeting_room import services as meeting_room_services
+
+    invite = await services.get_invite_by_token(db, token)
+    if invite is None:
+        raise HTTPException(status_code=404, detail="This registration link is invalid or has expired")
+
+    group = await services.get_identity(db, invite.identity_id)
+
+    try:
+        identity = await services.create_identity(
+            db, name=req.name, id_type=IdentityType.member, parent_id=invite.identity_id,
+            actor_type=ActorType.system, actor_id=None,
+        )
+        await services.create_member_profile(
+            db, identity_id=identity.id, email=req.email, phone_number=req.mobile_number,
+            extra_info=req.extra_info, source_invite_id=invite.id,
+        )
+        await meeting_room_services.link_phone_number(
+            db, req.mobile_number, identity.id, actor_type=ActorType.system, actor_id=None
+        )
+        await services.record_consent(
+            db, identity.id, context=ConsentContext.onboarding, granted=True, staff_id=None,
+            note="Captured via public self-registration form submission",
+        )
+    except services.ProfilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    prefill_text = settings.whatsapp_invite_prefill_template.format(name=req.name, group_name=group.name)
+    whatsapp_url = f"https://wa.me/{settings.whatsapp_agent_display_number}?text={quote(prefill_text)}"
+
+    await db.commit()
+    return schemas.MemberRegistrationResponse(whatsapp_url=whatsapp_url, member_name=req.name)

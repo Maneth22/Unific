@@ -13,6 +13,7 @@ from app.meeting_room.router import client_router as meeting_room_client_router
 from app.meeting_room.router import router as meeting_room_router
 from app.middleware import SecurityHeadersMiddleware
 from app.profiles.router import client_router as profiles_client_router
+from app.profiles.router import public_router as profiles_public_router
 from app.profiles.router import router as profiles_router
 
 app = FastAPI(
@@ -34,6 +35,7 @@ app.include_router(staff_auth_router)
 app.include_router(accounts_router)
 app.include_router(profiles_router)
 app.include_router(profiles_client_router)
+app.include_router(profiles_public_router)
 app.include_router(meeting_room_router)
 app.include_router(meeting_room_client_router)
 

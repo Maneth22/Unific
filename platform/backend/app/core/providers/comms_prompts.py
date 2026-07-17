@@ -244,3 +244,43 @@ Anything the community member asked for that was not addressed by the end of the
   "unmet_needs": ["..."],
   "recommendations": ["..."]
 }}"""
+
+
+MEMBER_SUMMARY_PROMPT = """You are a community relationship agent for a platform connecting a client organisation with the individual community members registered under it.
+
+## Task
+Analyze the full personal-chat transcript below between this one community member and their personal agent. Unlike a single-session recap, this is an ongoing profile: summarize who this person is and what they need, based on everything they have said across the whole conversation so far. Ground every judgement in their actual words; do not speculate beyond the transcript.
+
+## Transcript
+{transcript}
+
+## Instructions
+Produce a running profile covering:
+
+### 1. Profile Summary
+2-4 sentences describing who this member is and what they have been talking about, as if briefing the client before a first meeting.
+
+### 2. Key Topics
+The recurring subjects this member raises (e.g. "school fees", "crop prices", "water access").
+
+### 3. Needs Expressed
+Concrete things this member has asked for or expressed needing, across the whole conversation.
+
+### 4. Overall Sentiment
+How this member generally comes across — content, worried, hopeful, frustrated, mixed.
+
+### 5. Communication Notes
+Anything useful about how they communicate — language, directness, topics they avoid, etc.
+
+## Output Rules
+- Output ONLY a raw JSON object — no markdown fences, no ```json, no explanations before or after.
+- "sentiment_overall" must be one of: "positive", "mixed", "concerned", "neutral"
+- "key_topics" and "needs_expressed" are each a list of short strings (may be empty lists)
+
+{{
+  "profile_summary": "2-4 sentence running profile",
+  "key_topics": ["..."],
+  "needs_expressed": ["..."],
+  "sentiment_overall": "positive|mixed|concerned|neutral",
+  "communication_notes": "Brief note on how they communicate"
+}}"""

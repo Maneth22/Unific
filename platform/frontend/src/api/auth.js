@@ -28,8 +28,3 @@ export async function createStaff(email, password, full_name) {
   const { data } = await apiClient.post('/auth/staff/staff', { email, password, full_name })
   return data
 }
-
-export async function grantRoomAccess(staffId, room, permission) {
-  const { data } = await apiClient.post(`/auth/staff/staff/${staffId}/room-access`, { room, permission })
-  return data
-}

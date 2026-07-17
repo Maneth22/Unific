@@ -9,7 +9,7 @@ const ROOMS = [
 ]
 
 export default function StaffDashboardLayout() {
-  const { staff, hasRoomAccess, logout } = useAuth()
+  const { staff, logout } = useAuth()
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
@@ -28,29 +28,10 @@ export default function StaffDashboardLayout() {
         </div>
 
         <nav style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
-          {ROOMS.map((room) =>
-            hasRoomAccess(room.key) ? (
-              <NavLink
-                key={room.key}
-                to={room.path}
-                style={({ isActive }) => ({
-                  padding: '9px 10px',
-                  borderRadius: 8,
-                  fontSize: 13,
-                  fontWeight: 600,
-                  textDecoration: 'none',
-                  color: isActive ? 'white' : 'var(--ink)',
-                  background: isActive ? 'var(--slate)' : 'transparent',
-                })}
-              >
-                {room.label}
-              </NavLink>
-            ) : null
-          )}
-
-          {staff?.is_superadmin && (
+          {ROOMS.map((room) => (
             <NavLink
-              to="/staff-management"
+              key={room.key}
+              to={room.path}
               style={({ isActive }) => ({
                 padding: '9px 10px',
                 borderRadius: 8,
@@ -59,12 +40,42 @@ export default function StaffDashboardLayout() {
                 textDecoration: 'none',
                 color: isActive ? 'white' : 'var(--ink)',
                 background: isActive ? 'var(--slate)' : 'transparent',
-                marginTop: 10,
               })}
             >
-              Staff &amp; Access
+              {room.label}
             </NavLink>
-          )}
+          ))}
+
+          <NavLink
+            to="/registration-requests"
+            style={({ isActive }) => ({
+              padding: '9px 10px',
+              borderRadius: 8,
+              fontSize: 13,
+              fontWeight: 600,
+              textDecoration: 'none',
+              color: isActive ? 'white' : 'var(--ink)',
+              background: isActive ? 'var(--slate)' : 'transparent',
+              marginTop: 10,
+            })}
+          >
+            Client Requests
+          </NavLink>
+
+          <NavLink
+            to="/staff-management"
+            style={({ isActive }) => ({
+              padding: '9px 10px',
+              borderRadius: 8,
+              fontSize: 13,
+              fontWeight: 600,
+              textDecoration: 'none',
+              color: isActive ? 'white' : 'var(--ink)',
+              background: isActive ? 'var(--slate)' : 'transparent',
+            })}
+          >
+            Staff &amp; Access
+          </NavLink>
         </nav>
 
         <div style={{ borderTop: '1px solid var(--line)', paddingTop: 12, fontSize: 12 }}>

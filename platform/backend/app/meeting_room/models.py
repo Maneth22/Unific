@@ -127,6 +127,10 @@ class WhatsAppLink(Base):
 class ReportType(str, enum.Enum):
     session_summary = "session_summary"
     satisfaction_analysis = "satisfaction_analysis"
+    # A community member's ongoing profile summary, distinct from a single
+    # session recap — surfaced on the client dashboard's community roster
+    # (see app.profiles.router's /client/communities/{id}/members).
+    member_summary = "member_summary"
 
 
 class SessionReport(Base):

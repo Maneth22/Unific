@@ -16,9 +16,13 @@ def uuid_str() -> str:
 
 class RoomName(str, enum.Enum):
     """The eight rooms. Only 1-3 are built this pass; the rest exist here
-    so staff_room_access, the calendar, the archive lockers, and room
-    accounts can reference them the moment a future room is stood up,
-    without a schema change."""
+    so the calendar, the archive lockers, and room accounts can reference
+    them the moment a future room is stood up, without a schema change.
+
+    This is a tagging/scoping label only — it does not imply a per-room
+    access grant. Every staff account has full access to every room (see
+    `app.core.security.dependencies.require_admin`); there is no
+    `RoomPermission` model any more."""
 
     accounts = "accounts"
     profiles = "profiles"
@@ -28,11 +32,3 @@ class RoomName(str, enum.Enum):
     resources = "resources"
     assets = "assets"
     hold_data = "hold_data"
-
-
-class RoomPermission(str, enum.Enum):
-    """A staff member's grant level within a room they've been given access to."""
-
-    read = "read"
-    write = "write"
-    admin = "admin"

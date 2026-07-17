@@ -25,3 +25,11 @@ export const recordConsent = (id, payload) => apiClient.post(`/profiles/identiti
 // --- Client account provisioning (staff-side) ---
 export const createClientAccount = (identityId, payload) =>
   apiClient.post(`/profiles/identities/${identityId}/client-account`, payload).then((r) => r.data)
+
+// --- Client registration requests (Admin review queue) ---
+export const listRegistrationRequests = (status) =>
+  apiClient.get('/profiles/registration-requests', { params: status ? { status_filter: status } : {} }).then((r) => r.data)
+export const approveRegistrationRequest = (id) =>
+  apiClient.post(`/profiles/registration-requests/${id}/approve`).then((r) => r.data)
+export const rejectRegistrationRequest = (id, reason = '') =>
+  apiClient.post(`/profiles/registration-requests/${id}/reject`, { reason }).then((r) => r.data)

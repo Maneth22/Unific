@@ -14,11 +14,11 @@ from app.accounts import schemas as accounts_schemas
 from app.core.models.archive import ArchiveShelf
 from app.core.models.audit import ActorType
 from app.core.models.client import ClientUser
-from app.core.models.common import RoomName, RoomPermission
+from app.core.models.common import RoomName
 from app.core.models.staff import StaffUser
 from app.core.providers.base import ProviderError
 from app.core.providers.factory import get_comms_agent, get_reply_generator, get_whatsapp_provider
-from app.core.security.dependencies import require_room_access
+from app.core.security.dependencies import require_admin
 from app.core.services import archive_service, scope_service
 from app.database import get_db
 from app.meeting_room import schemas, services
@@ -29,8 +29,7 @@ from app.profiles.services import update_own_permission
 
 router = APIRouter(prefix="/api/meeting-room", tags=["meeting_room"])
 
-read_access = require_room_access(RoomName.meeting_room, RoomPermission.read)
-write_access = require_room_access(RoomName.meeting_room, RoomPermission.write)
+admin = require_admin
 
 
 # --- Inbound webhook (no staff/client auth — the external channel) ---
@@ -65,14 +64,14 @@ async def inbound_webhook(request: Request, db: AsyncSession = Depends(get_db)):
 # --- WhatsApp links ---
 
 @router.get("/whatsapp-links", response_model=list[schemas.WhatsAppLinkOut])
-async def list_links(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_links(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(WhatsAppLink))
     return list(result.scalars().all())
 
 
 @router.post("/whatsapp-links", response_model=schemas.WhatsAppLinkOut, status_code=status.HTTP_201_CREATED)
 async def create_link(
-    req: schemas.WhatsAppLinkCreate, staff: StaffUser = Depends(write_access), db: AsyncSession = Depends(get_db)
+    req: schemas.WhatsAppLinkCreate, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)
 ):
     link = await services.link_phone_number(
         db, req.phone_number, req.identity_id, actor_type=ActorType.staff, actor_id=staff.id
@@ -84,12 +83,12 @@ async def create_link(
 # --- Conversations ---
 
 @router.get("/conversations", response_model=list[schemas.ConversationOut])
-async def list_conversations(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_conversations(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.list_conversations(db)
 
 
 @router.get("/conversations/{conversation_id}", response_model=schemas.ConversationDetailOut)
-async def get_conversation(conversation_id: str, staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def get_conversation(conversation_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     conversation = await db.get(Conversation, conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -101,7 +100,7 @@ async def get_conversation(conversation_id: str, staff: StaffUser = Depends(read
 async def reply_to_conversation(
     conversation_id: str,
     req: schemas.ManualReplyRequest,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -122,7 +121,7 @@ async def reply_to_conversation(
 
 @router.post("/conversations/initiate", response_model=schemas.ConversationOut, status_code=status.HTTP_201_CREATED)
 async def initiate_room(
-    req: schemas.InitiateRoomRequest, staff: StaffUser = Depends(write_access), db: AsyncSession = Depends(get_db)
+    req: schemas.InitiateRoomRequest, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)
 ):
     try:
         conversation = await services.initiate_comms_room(
@@ -145,7 +144,7 @@ async def initiate_room(
 async def generate_report(
     conversation_id: str,
     req: schemas.ReportGenerateRequest,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     report_type = _parse_report_type(req.report_type)
@@ -167,7 +166,7 @@ async def generate_report(
 
 
 @router.get("/conversations/{conversation_id}/reports", response_model=list[schemas.ReportOut])
-async def list_reports(conversation_id: str, staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_reports(conversation_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.list_reports(db, conversation_id)
 
 
@@ -176,7 +175,8 @@ def _parse_report_type(value: str) -> ReportType:
         return ReportType(value)
     except ValueError as exc:
         raise HTTPException(
-            status_code=400, detail="report_type must be 'session_summary' or 'satisfaction_analysis'"
+            status_code=400,
+            detail="report_type must be 'session_summary', 'satisfaction_analysis', or 'member_summary'",
         ) from exc
 
 
@@ -312,12 +312,12 @@ async def client_list_reports(
 # --- Meetings ---
 
 @router.get("/meetings", response_model=list[schemas.MeetingOut])
-async def list_meetings(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_meetings(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.list_meetings(db)
 
 
 @router.post("/meetings", response_model=schemas.MeetingOut, status_code=status.HTTP_201_CREATED)
-async def create_meeting(req: schemas.MeetingCreate, staff: StaffUser = Depends(write_access), db: AsyncSession = Depends(get_db)):
+async def create_meeting(req: schemas.MeetingCreate, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     meeting = await services.schedule_meeting(
         db,
         host_identity_id=req.host_identity_id,
@@ -333,7 +333,7 @@ async def create_meeting(req: schemas.MeetingCreate, staff: StaffUser = Depends(
 # --- Config Board (a view over profiles.permission's reply_* fields) ---
 
 @router.get("/config-board/{identity_id}", response_model=schemas.ConfigBoardOut)
-async def get_config_board(identity_id: str, staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def get_config_board(identity_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     perm = await db.get(Permission, identity_id)
     if perm is None:
         raise HTTPException(status_code=404, detail="Identity not found")
@@ -351,7 +351,7 @@ async def get_config_board(identity_id: str, staff: StaffUser = Depends(read_acc
 async def update_config_board(
     identity_id: str,
     req: schemas.ConfigBoardUpdate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     field_map = {
@@ -377,7 +377,7 @@ async def update_config_board(
 # --- Archive Locker (reuses the core three-shelf pattern for this room) ---
 
 @router.get("/archive/{shelf}", response_model=list[accounts_schemas.ArchiveItemOut])
-async def list_archive_shelf(shelf: str, staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_archive_shelf(shelf: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     try:
         shelf_enum = ArchiveShelf(shelf)
     except ValueError as exc:
@@ -387,7 +387,7 @@ async def list_archive_shelf(shelf: str, staff: StaffUser = Depends(read_access)
 
 @router.post("/archive", response_model=accounts_schemas.ArchiveItemOut, status_code=status.HTTP_201_CREATED)
 async def create_archive_item(
-    req: accounts_schemas.ArchiveItemCreate, staff: StaffUser = Depends(write_access), db: AsyncSession = Depends(get_db)
+    req: accounts_schemas.ArchiveItemCreate, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)
 ):
     item = await archive_service.create_item(
         db,

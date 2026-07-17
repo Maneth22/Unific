@@ -9,6 +9,7 @@ import pytest
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from app.core.models.audit import ActorType
 from app.core.models.client import ClientUser
 from app.core.security.jwt import create_access_token
 from app.core.security.password import hash_password
@@ -28,9 +29,18 @@ async def probe(client: ClientUser = Depends(_scope_dep)):
 
 async def _build_tree_and_client():
     async with AsyncSessionLocal() as db:
-        root = await services.create_identity(db, name="Root Co-op", id_type=IdentityType.group, parent_id=None, staff_id=None)
-        child = await services.create_identity(db, name="Sub Group", id_type=IdentityType.group, parent_id=root.id, staff_id=None)
-        sibling = await services.create_identity(db, name="Sibling Group", id_type=IdentityType.group, parent_id=None, staff_id=None)
+        root = await services.create_identity(
+            db, name="Root Co-op", id_type=IdentityType.group, parent_id=None,
+            actor_type=ActorType.system, actor_id=None,
+        )
+        child = await services.create_identity(
+            db, name="Sub Group", id_type=IdentityType.group, parent_id=root.id,
+            actor_type=ActorType.system, actor_id=None,
+        )
+        sibling = await services.create_identity(
+            db, name="Sibling Group", id_type=IdentityType.group, parent_id=None,
+            actor_type=ActorType.system, actor_id=None,
+        )
 
         client = ClientUser(
             email="scope-test-client@example.org",

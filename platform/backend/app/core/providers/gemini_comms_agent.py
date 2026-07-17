@@ -149,3 +149,12 @@ class GeminiCommsAgent(CommsAgent):
             db, prompt=prompt, action="satisfaction_analysis", identity_id=identity_id, room=room,
             agent_name=agent_name, max_output_tokens=800,
         )
+
+    async def generate_member_summary(
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+    ) -> dict:
+        prompt = comms_prompts.MEMBER_SUMMARY_PROMPT.format(transcript=transcript)
+        return await self._call(
+            db, prompt=prompt, action="member_summary", identity_id=identity_id, room=room,
+            agent_name=agent_name, max_output_tokens=800,
+        )

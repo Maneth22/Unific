@@ -8,17 +8,20 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.models.common import RoomName, RoomPermission, utcnow, uuid_str
+from app.core.models.common import utcnow, uuid_str
 from app.database import Base
 
 
 class StaffUser(Base):
-    """A UNIFIC staff account. Access to any given room is not implied by
-    this row alone — it is granted explicitly per room via
-    `StaffRoomAccess` (least privilege by default, per the Flags doc)."""
+    """A UNIFIC staff account — every staff row is a full Admin. There is
+    no per-room grant model: any active staff account can read/write every
+    room, and can provision another staff account (see `app.core.security.
+    dependencies.require_admin`). The previous per-room `StaffRoomAccess`
+    grant table and `is_superadmin` distinction were collapsed into this
+    single role by deliberate choice, not by accident."""
 
     __tablename__ = "staff_user"
     __table_args__ = {"schema": "core"}
@@ -28,7 +31,6 @@ class StaffUser(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Reserved for future TOTP-based MFA on staff accounts touching Task 1
     # (the "crown jewels" module) — not enforced yet, field present so the
     # login flow doesn't need reshaping later.
@@ -36,46 +38,6 @@ class StaffUser(Base):
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
-
-    # Eager (selectin) load: StaffOut always serializes room_access, and
-    # doing that lazily inside a Pydantic validator after the session's
-    # async context has moved on is exactly the MissingGreenlet trap —
-    # load it as part of the same query instead of patching every call site.
-    room_access: Mapped[list["StaffRoomAccess"]] = relationship(
-        back_populates="staff_user",
-        foreign_keys="StaffRoomAccess.staff_user_id",
-        cascade="all, delete-orphan",
-        lazy="selectin",
-    )
-
-
-class StaffRoomAccess(Base):
-    """One row per (staff, room) grant. A staff member may hold 1-8 of
-    these — the master-dashboard permission model described in the docs."""
-
-    __tablename__ = "staff_room_access"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
-    staff_user_id: Mapped[str] = mapped_column(
-        ForeignKey("core.staff_user.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    room: Mapped[RoomName] = mapped_column(Enum(RoomName, name="room_name"), nullable=False)
-    permission: Mapped[RoomPermission] = mapped_column(
-        Enum(RoomPermission, name="room_permission"), default=RoomPermission.read, nullable=False
-    )
-    granted_by: Mapped[str | None] = mapped_column(
-        ForeignKey("core.staff_user.id", ondelete="SET NULL"), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
-
-    staff_user: Mapped["StaffUser"] = relationship(
-        back_populates="room_access", foreign_keys=[staff_user_id]
-    )
-
-    __table_args__ = (
-        Index("ix_staff_room_access_user_room", "staff_user_id", "room", unique=True),
-        {"schema": "core"},
-    )
 
 
 class RefreshToken(Base):

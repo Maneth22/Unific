@@ -10,3 +10,12 @@ export const fundMyAccount = (id, amount, description = '') =>
   apiClient.post(`/profiles/client/identities/${id}/fund`, { amount, description }).then((r) => r.data)
 export const transferMyCredit = (fromId, toId, amount, description = '') =>
   apiClient.post(`/profiles/client/identities/${fromId}/transfer`, { to_identity_id: toId, amount, description })
+
+// --- Communities (the client's "Profiles" tab) ---
+export const createCommunity = (name, parentId) =>
+  apiClient.post('/profiles/client/communities', { name, parent_id: parentId }).then((r) => r.data)
+export const listCommunities = () => apiClient.get('/profiles/client/communities').then((r) => r.data)
+export const listCommunityMembers = (groupId) =>
+  apiClient.get(`/profiles/client/communities/${groupId}/members`).then((r) => r.data)
+export const regenerateInvite = (groupId) =>
+  apiClient.post(`/profiles/client/communities/${groupId}/invite/regenerate`).then((r) => r.data)

@@ -80,3 +80,14 @@ class MockCommsAgent(CommsAgent):
             "unmet_needs": [],
             "recommendations": [],
         }
+
+    async def generate_member_summary(
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+    ) -> dict:
+        return {
+            "profile_summary": "Mock member summary — no LLM configured.",
+            "key_topics": [],
+            "needs_expressed": [],
+            "sentiment_overall": "neutral",
+            "communication_notes": "Unknown",
+        }

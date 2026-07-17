@@ -4,8 +4,6 @@ import { setAccessToken, setRefreshEndpoint, setUnauthorizedHandler } from '../a
 
 const AuthContext = createContext(null)
 
-const PERMISSION_RANK = { read: 0, write: 1, admin: 2 }
-
 export function AuthProvider({ children }) {
   const [staff, setStaff] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -62,30 +60,17 @@ export function AuthProvider({ children }) {
     return data
   }, [])
 
-  const hasRoomAccess = useCallback(
-    (room, minimum = 'read') => {
-      if (!staff) return false
-      if (staff.is_superadmin) return true
-      const grant = staff.room_access?.find((r) => r.room === room)
-      if (!grant) return false
-      return PERMISSION_RANK[grant.permission] >= PERMISSION_RANK[minimum]
-    },
-    [staff]
-  )
-
   const value = useMemo(
     () => ({
       staff,
       loading,
       isAuthenticated: !!staff,
-      isSuperadmin: !!staff?.is_superadmin,
       login,
       bootstrap,
       logout,
       refreshStaff,
-      hasRoomAccess,
     }),
-    [staff, loading, login, bootstrap, logout, refreshStaff, hasRoomAccess]
+    [staff, loading, login, bootstrap, logout, refreshStaff]
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

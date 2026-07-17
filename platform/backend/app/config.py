@@ -53,6 +53,21 @@ class Settings(BaseSettings):
     whatsapp_cloud_api_phone_number_id: str = ""
     whatsapp_cloud_api_verify_token: str = ""
 
+    # The dialable agent number (digits, with country code, no "+") used
+    # to build `wa.me` click-to-chat deep links after public member
+    # registration. Distinct from whatsapp_cloud_api_phone_number_id
+    # above, which is a Graph API resource id, not a dialable number.
+    whatsapp_agent_display_number: str = ""
+    whatsapp_invite_prefill_template: str = "Hi, I'm {name} from {group_name}. I just registered and would like to talk."
+
+    # Canonical frontend origin, used server-side to build links returned
+    # to a dashboard (e.g. a community's registration invite URL). Must
+    # match the frontend's actual dev port (see frontend/vite.config.js
+    # and CORS_ORIGINS above — both use 5183, not Vite's generic 5173
+    # default) or generated invite links point at a port nothing is
+    # listening on.
+    frontend_base_url: str = "http://localhost:5183"
+
     # Gemini — backs REPLY_PROVIDER=gemini / TRANSLATION_PROVIDER=gemini.
     # gemini-flash-lite is the same cheap-model choice the prototype made,
     # which matters given the docs' near-free base-service target.

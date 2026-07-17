@@ -1,6 +1,11 @@
-"""Task 1 — Accounts room API. Every route depends on
-`require_room_access(RoomName.accounts, ...)` — the server-side boundary;
-nothing here trusts the frontend to have hidden a nav item.
+"""Task 1 — Accounts room API. Every route depends on `require_admin` —
+the server-side boundary; nothing here trusts the frontend to have hidden
+a nav item. There is no per-room grant model any more (see
+`app.core.security.dependencies`), so `reveal_secret` below — previously
+the one route requiring the stricter `RoomPermission.admin` tier — now
+only requires "is an active staff member," same as every other route in
+this router. That is an intentional consequence of collapsing staff roles
+to a single Admin role, not an oversight.
 """
 from __future__ import annotations
 
@@ -11,23 +16,21 @@ from app.accounts import schemas, services
 from app.accounts.models import AccountCategory, ApiHealthStatus, FinancialRecordCategory
 from app.core.models.archive import ArchiveShelf
 from app.core.models.audit import ActorType
-from app.core.models.common import RoomName, RoomPermission
+from app.core.models.common import RoomName
 from app.core.models.staff import StaffUser
-from app.core.security.dependencies import client_ip, require_room_access
+from app.core.security.dependencies import client_ip, require_admin
 from app.core.services import archive_service, calendar_service, llm_usage_service
 from app.database import get_db
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
-read_access = require_room_access(RoomName.accounts, RoomPermission.read)
-write_access = require_room_access(RoomName.accounts, RoomPermission.write)
-admin_access = require_room_access(RoomName.accounts, RoomPermission.admin)
+admin = require_admin
 
 
 # --- Account Registry ---
 
 @router.get("/registry", response_model=list[schemas.AccountRegistryOut])
-async def list_registry(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_registry(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     entries = await services.list_registry_entries(db)
     return [_to_registry_out(e) for e in entries]
 
@@ -35,7 +38,7 @@ async def list_registry(staff: StaffUser = Depends(read_access), db: AsyncSessio
 @router.post("/registry", response_model=schemas.AccountRegistryOut, status_code=status.HTTP_201_CREATED)
 async def create_registry(
     req: schemas.AccountRegistryCreate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -64,7 +67,7 @@ async def create_registry(
 async def update_registry(
     entry_id: str,
     req: schemas.AccountRegistryUpdate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     fields = req.model_dump(exclude={"secret"}, exclude_none=True)
@@ -85,12 +88,13 @@ async def update_registry(
 async def reveal_secret(
     entry_id: str,
     request: Request,
-    staff: StaffUser = Depends(admin_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Highest-sensitivity action in the system — requires 'admin' level
-    room access (not just write), and is always audit-logged whether or
-    not a secret exists."""
+    """Highest-sensitivity action in the system — requires an active staff
+    (Admin) account, and is always audit-logged whether or not a secret
+    exists. There is no stricter room-level tier above this any more (see
+    the module docstring)."""
     secret = await services.reveal_secret(db, entry_id, staff_id=staff.id, ip_address=client_ip(request))
     await db.commit()
     if secret is None:
@@ -118,14 +122,14 @@ def _to_registry_out(entry) -> schemas.AccountRegistryOut:
 # --- Financial Dashboard ---
 
 @router.get("/financial/records", response_model=list[schemas.FinancialRecordOut])
-async def list_financial_records(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_financial_records(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.list_financial_records(db)
 
 
 @router.post("/financial/records", response_model=schemas.FinancialRecordOut, status_code=status.HTTP_201_CREATED)
 async def create_financial_record(
     req: schemas.FinancialRecordCreate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -150,21 +154,21 @@ async def create_financial_record(
 
 
 @router.get("/financial/summary", response_model=schemas.FinancialSummaryOut)
-async def get_financial_summary(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def get_financial_summary(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.financial_summary(db)
 
 
 # --- API Monitor ---
 
 @router.get("/api-monitor", response_model=list[schemas.ApiMonitorOut])
-async def list_api_monitor(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_api_monitor(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.list_api_monitor_entries(db)
 
 
 @router.post("/api-monitor", response_model=schemas.ApiMonitorOut, status_code=status.HTTP_201_CREATED)
 async def create_api_monitor(
     req: schemas.ApiMonitorCreate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -191,7 +195,7 @@ async def create_api_monitor(
 async def update_api_monitor(
     entry_id: str,
     req: schemas.ApiMonitorUpdate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     fields = req.model_dump(exclude_none=True)
@@ -211,14 +215,14 @@ async def update_api_monitor(
 # --- Calendar (Task 1's Calendar Engine — the master calendar's view for this room) ---
 
 @router.get("/calendar", response_model=list[schemas.CalendarEventOut])
-async def list_calendar(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def list_calendar(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await calendar_service.list_for_room(db, RoomName.accounts)
 
 
 @router.post("/calendar", response_model=schemas.CalendarEventOut, status_code=status.HTTP_201_CREATED)
 async def create_calendar_event(
     req: schemas.CalendarEventCreate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     event = await calendar_service.submit_timing(
@@ -240,7 +244,7 @@ async def create_calendar_event(
 
 @router.get("/archive/{shelf}", response_model=list[schemas.ArchiveItemOut])
 async def list_archive_shelf(
-    shelf: str, staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)
+    shelf: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)
 ):
     try:
         shelf_enum = ArchiveShelf(shelf)
@@ -252,7 +256,7 @@ async def list_archive_shelf(
 @router.post("/archive", response_model=schemas.ArchiveItemOut, status_code=status.HTTP_201_CREATED)
 async def create_archive_item(
     req: schemas.ArchiveItemCreate,
-    staff: StaffUser = Depends(write_access),
+    staff: StaffUser = Depends(admin),
     db: AsyncSession = Depends(get_db),
 ):
     item = await archive_service.create_item(
@@ -273,14 +277,14 @@ async def create_archive_item(
 # --- Administrative agent ---
 
 @router.get("/administrative-summary", response_model=schemas.AdministrativeSummaryOut)
-async def administrative_summary(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def administrative_summary(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.administrative_summary(db)
 
 
 # --- AI usage ---
 
 @router.get("/ai-usage/summary", response_model=list[schemas.AiUsageSummaryRow])
-async def ai_usage_summary(staff: StaffUser = Depends(read_access), db: AsyncSession = Depends(get_db)):
+async def ai_usage_summary(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     """Per-identity token usage across the whole system — who/what is
     actually spending on LLM calls. Recording only; no limit is enforced
     yet, see docs/ARCHITECTURE.md for the intended enforcement hook."""

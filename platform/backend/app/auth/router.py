@@ -1,10 +1,17 @@
 """Staff (master dashboard) authentication.
 
-There is deliberately no open self-registration endpoint: Task 1 is "the
-crown jewels" and master dashboards are provisioned, not signed up for.
-The very first staff account is created via `/bootstrap` (which refuses
-to run once any staff account exists); every subsequent staff account is
-created by a superadmin via `/staff`.
+There is deliberately no open self-registration endpoint for staff: every
+staff account is a full Admin (there is no per-room grant model any more —
+see `app.core.security.dependencies.require_admin`), so master-dashboard
+accounts are provisioned, not signed up for. The very first staff account
+is created via `/bootstrap` (which refuses to run once any staff account
+exists); every subsequent staff account is created by an existing Admin
+via `/staff` — any Admin can provision another Admin, there is no separate
+gatekeeper role.
+
+Clients, unlike staff, DO have a self-registration path — see
+`app.profiles.router`'s public router (`POST /api/profiles/public/client-signup`)
+and the Admin approval queue (`GET/POST /api/profiles/registration-requests`).
 """
 from __future__ import annotations
 
@@ -14,15 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.schemas import (
     AccessTokenResponse,
-    RoomAccessGrantRequest,
     StaffBootstrapRequest,
     StaffCreateRequest,
     StaffLoginRequest,
     StaffOut,
 )
 from app.core.models.audit import ActorType
-from app.core.models.common import RoomName, RoomPermission
-from app.core.models.staff import RefreshToken, StaffRoomAccess, StaffUser
+from app.core.models.staff import RefreshToken, StaffUser
 from app.core.services import audit_service
 from app.core.security.cookies import REFRESH_COOKIE_NAME, clear_refresh_cookie, set_refresh_cookie
 from app.core.security.dependencies import client_ip, get_current_staff_user
@@ -45,7 +50,6 @@ async def bootstrap(req: StaffBootstrapRequest, response: Response, db: AsyncSes
         email=req.email.lower(),
         password_hash=hash_password(req.password),
         full_name=req.full_name,
-        is_superadmin=True,
     )
     db.add(staff)
     await db.flush()
@@ -61,7 +65,6 @@ async def bootstrap(req: StaffBootstrapRequest, response: Response, db: AsyncSes
 
     tokens = await issue_tokens(db, audience="staff", staff_user_id=staff.id)
     await db.commit()
-    await db.refresh(staff, attribute_names=["room_access"])
 
     set_refresh_cookie(response, tokens.raw_refresh_token, tokens.refresh_expires_at_seconds)
     return AccessTokenResponse(access_token=tokens.access_token, staff=StaffOut.model_validate(staff))
@@ -100,7 +103,6 @@ async def login(req: StaffLoginRequest, request: Request, response: Response, db
 
     tokens = await issue_tokens(db, audience="staff", staff_user_id=staff.id)
     await db.commit()
-    await db.refresh(staff, attribute_names=["room_access"])
 
     set_refresh_cookie(response, tokens.raw_refresh_token, tokens.refresh_expires_at_seconds)
     return AccessTokenResponse(access_token=tokens.access_token, staff=StaffOut.model_validate(staff))
@@ -128,7 +130,6 @@ async def refresh(request: Request, response: Response, db: AsyncSession = Depen
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found or inactive")
 
     await db.commit()
-    await db.refresh(staff, attribute_names=["room_access"])
 
     set_refresh_cookie(response, new_tokens.raw_refresh_token, new_tokens.refresh_expires_at_seconds)
     return AccessTokenResponse(access_token=new_tokens.access_token, staff=StaffOut.model_validate(staff))
@@ -156,8 +157,7 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
 
 
 @router.get("/me", response_model=StaffOut)
-async def me(current_staff: StaffUser = Depends(get_current_staff_user), db: AsyncSession = Depends(get_db)):
-    await db.refresh(current_staff, attribute_names=["room_access"])
+async def me(current_staff: StaffUser = Depends(get_current_staff_user)):
     return StaffOut.model_validate(current_staff)
 
 
@@ -167,9 +167,8 @@ async def create_staff(
     current_staff: StaffUser = Depends(get_current_staff_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if not current_staff.is_superadmin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin only")
-
+    """Any active Admin can provision another Admin — there is no separate
+    gatekeeper role since the per-room grant model was collapsed."""
     existing = await db.execute(select(StaffUser).where(StaffUser.email == req.email.lower()))
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
@@ -192,56 +191,4 @@ async def create_staff(
         after={"email": new_staff.email, "full_name": new_staff.full_name},
     )
     await db.commit()
-    await db.refresh(new_staff, attribute_names=["room_access"])
     return StaffOut.model_validate(new_staff)
-
-
-@router.post("/staff/{staff_id}/room-access", response_model=StaffOut)
-async def grant_room_access(
-    staff_id: str,
-    req: RoomAccessGrantRequest,
-    current_staff: StaffUser = Depends(get_current_staff_user),
-    db: AsyncSession = Depends(get_db),
-):
-    if not current_staff.is_superadmin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin only")
-
-    try:
-        room = RoomName(req.room)
-        permission = RoomPermission(req.permission)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    result = await db.execute(select(StaffUser).where(StaffUser.id == staff_id))
-    target = result.scalar_one_or_none()
-    if target is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Staff user not found")
-
-    existing = await db.execute(
-        select(StaffRoomAccess).where(
-            StaffRoomAccess.staff_user_id == staff_id, StaffRoomAccess.room == room
-        )
-    )
-    access = existing.scalar_one_or_none()
-    if access is not None:
-        access.permission = permission
-    else:
-        access = StaffRoomAccess(
-            staff_user_id=staff_id, room=room, permission=permission, granted_by=current_staff.id
-        )
-        db.add(access)
-    await db.flush()
-
-    await audit_service.record(
-        db,
-        actor_type=ActorType.staff,
-        actor_id=current_staff.id,
-        action="staff.room_access.grant",
-        room=room,
-        entity_type="staff_user",
-        entity_id=staff_id,
-        after={"room": room.value, "permission": permission.value},
-    )
-    await db.commit()
-    await db.refresh(target, attribute_names=["room_access"])
-    return StaffOut.model_validate(target)

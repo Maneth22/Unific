@@ -23,20 +23,6 @@ export default function ClientDashboardLayout() {
 
         <nav style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
           <NavLink
-            to="/client/meeting-room"
-            style={({ isActive }) => ({
-              padding: '9px 10px',
-              borderRadius: 8,
-              fontSize: 13,
-              fontWeight: 600,
-              textDecoration: 'none',
-              color: isActive ? 'white' : 'var(--ink)',
-              background: isActive ? 'var(--slate)' : 'transparent',
-            })}
-          >
-            Meeting Room
-          </NavLink>
-          <NavLink
             to="/client"
             end
             style={({ isActive }) => ({
@@ -50,6 +36,34 @@ export default function ClientDashboardLayout() {
             })}
           >
             Accounts
+          </NavLink>
+          <NavLink
+            to="/client/communities"
+            style={({ isActive }) => ({
+              padding: '9px 10px',
+              borderRadius: 8,
+              fontSize: 13,
+              fontWeight: 600,
+              textDecoration: 'none',
+              color: isActive ? 'white' : 'var(--ink)',
+              background: isActive ? 'var(--slate)' : 'transparent',
+            })}
+          >
+            Profiles
+          </NavLink>
+          <NavLink
+            to="/client/meeting-room"
+            style={({ isActive }) => ({
+              padding: '9px 10px',
+              borderRadius: 8,
+              fontSize: 13,
+              fontWeight: 600,
+              textDecoration: 'none',
+              color: isActive ? 'white' : 'var(--ink)',
+              background: isActive ? 'var(--slate)' : 'transparent',
+            })}
+          >
+            Meeting Room
           </NavLink>
         </nav>
 

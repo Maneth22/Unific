@@ -21,7 +21,8 @@ import enum
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Numeric, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Numeric, String, Text, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.models.common import utcnow, uuid_str
@@ -36,7 +37,19 @@ class IdentityType(str, enum.Enum):
 class Identity(Base):
     """A node in the registry tree. A `member` is always a leaf — enforced
     in `services.py`, not the database, since it depends on the sibling
-    rows at creation time."""
+    rows at creation time.
+
+    `created_by`/`created_by_client_id` are best-effort, mutually
+    exclusive convenience columns (mirroring the pattern already used by
+    `meeting_room.SessionReport.generated_by_staff_id`/
+    `generated_by_client_id`) recording which kind of actor created this
+    node — a staff member (manual provisioning, or approving a client
+    registration), a client (creating a community group under their own
+    scope), or neither (a member created via public self-registration,
+    `actor_type=system`, both columns null). The audit log
+    (`app.core.services.audit_service`) is the actual source of truth for
+    "who did this"; these columns just make the common case fast to read
+    without joining audit_log."""
 
     __tablename__ = "identity"
     __table_args__ = (
@@ -51,11 +64,13 @@ class Identity(Base):
     path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("core.staff_user.id", ondelete="SET NULL"), nullable=True)
+    created_by_client_id: Mapped[str | None] = mapped_column(ForeignKey("core.client_user.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     permission: Mapped["Permission"] = relationship(back_populates="identity", uselist=False, cascade="all, delete-orphan")
     profile_account: Mapped["ProfileAccount"] = relationship(back_populates="identity", uselist=False, cascade="all, delete-orphan")
+    member_profile: Mapped["MemberProfile"] = relationship(back_populates="identity", uselist=False, cascade="all, delete-orphan")
 
 
 class PermissionScope(str, enum.Enum):
@@ -151,3 +166,60 @@ class ConsentRecord(Base):
     note: Mapped[str] = mapped_column(Text, default="")
     captured_by: Mapped[str | None] = mapped_column(ForeignKey("core.staff_user.id", ondelete="SET NULL"), nullable=True)
     granted_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class GroupInvite(Base):
+    """A public registration link for one Group identity (a client's
+    community, e.g. "Sandahkal Group India"). At most one row may be
+    `is_active` per `identity_id` (enforced by the partial unique index
+    below) — regenerating an invite deactivates the current row and
+    inserts a new one rather than mutating the token in place, so a
+    leaked old link goes cold instead of silently being reused, and the
+    full history of every token ever issued for a community is kept.
+
+    The public registration flow (`app.profiles.router`'s unauthenticated
+    `public_router`) reads a `GroupInvite` by `token` to find which group
+    a submitted member-registration form belongs to."""
+
+    __tablename__ = "group_invite"
+    __table_args__ = (
+        Index("uq_group_invite_active_identity", "identity_id", unique=True, postgresql_where=text("is_active")),
+        {"schema": "profiles"},
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    identity_id: Mapped[str] = mapped_column(ForeignKey("profiles.identity.id", ondelete="CASCADE"), nullable=False, index=True)
+    token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by_client_id: Mapped[str | None] = mapped_column(ForeignKey("core.client_user.id", ondelete="SET NULL"), nullable=True)
+    created_by_staff_id: Mapped[str | None] = mapped_column(ForeignKey("core.staff_user.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class MemberProfile(Base):
+    """One row per Member identity created via the public registration
+    form — the descriptive info the form collects (name lives on
+    `Identity.name` itself; this holds the rest). Deliberately duplicates
+    `phone_number` with `meeting_room.WhatsAppLink`: that table is the
+    operational routing record the message pipeline actually reads,
+    this one is the descriptive record the client dashboard reads — same
+    "no cross-schema back-reference" style already used elsewhere between
+    these two rooms.
+
+    `extra_info` (not `metadata` — that name collides with SQLAlchemy's
+    `Base.metadata`) holds whatever additional fields the registration
+    form collected beyond name/email/phone."""
+
+    __tablename__ = "member_profile"
+    __table_args__ = {"schema": "profiles"}
+
+    identity_id: Mapped[str] = mapped_column(ForeignKey("profiles.identity.id", ondelete="CASCADE"), primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), default="")
+    phone_number: Mapped[str] = mapped_column(String(32), nullable=False)
+    extra_info: Mapped[dict] = mapped_column(JSONB, default=dict)
+    registered_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    registered_via: Mapped[str] = mapped_column(String(50), default="public_form")
+    source_invite_id: Mapped[str | None] = mapped_column(ForeignKey("profiles.group_invite.id", ondelete="SET NULL"), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    identity: Mapped["Identity"] = relationship(back_populates="member_profile")

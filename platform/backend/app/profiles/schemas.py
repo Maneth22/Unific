@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 
 class IdentityCreate(BaseModel):
@@ -202,3 +202,98 @@ class ClientAccountsOverviewOut(BaseModel):
     ai_usage: list[AiUsageSummaryRowClient]
     ai_total_tokens: int
     ai_total_cost: Decimal
+
+
+# --- Community groups & invites ---
+
+class GroupCreateRequest(BaseModel):
+    name: str
+    parent_id: str
+
+
+class GroupInviteOut(BaseModel):
+    id: str
+    identity_id: str
+    token: str
+    invite_url: str
+    is_active: bool
+    created_at: datetime
+
+
+class CommunityOut(BaseModel):
+    id: str
+    name: str
+    parent_id: str | None
+    is_active: bool
+    created_at: datetime
+    member_count: int
+    invite: GroupInviteOut | None
+
+
+class MemberProfileOut(BaseModel):
+    identity_id: str
+    email: str
+    phone_number: str
+    extra_info: dict
+    registered_at: datetime
+    registered_via: str
+
+    model_config = {"from_attributes": True}
+
+
+class CommunityMemberOut(BaseModel):
+    id: str
+    name: str
+    is_active: bool
+    created_at: datetime
+    profile: MemberProfileOut | None
+    conversation_id: str | None
+
+
+# --- Client self-registration + admin approval ---
+
+class ClientSignupRequest(BaseModel):
+    org_name: str = Field(min_length=1, max_length=255)
+    contact_name: str = Field(min_length=1, max_length=255)
+    email: EmailStr
+    password: str = Field(min_length=12)
+
+
+class ClientSignupOut(BaseModel):
+    id: str
+    status: str
+
+
+class RegistrationRequestOut(BaseModel):
+    id: str
+    org_name: str
+    contact_name: str
+    email: str
+    status: str
+    rejection_reason: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class RegistrationRejectRequest(BaseModel):
+    reason: str = ""
+
+
+# --- Public community-member registration ---
+
+class PublicGroupInfoOut(BaseModel):
+    group_name: str
+    org_name: str
+
+
+class MemberRegistrationRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    email: str = ""
+    mobile_number: str = Field(min_length=1, max_length=32)
+    extra_info: dict = {}
+
+
+class MemberRegistrationResponse(BaseModel):
+    whatsapp_url: str
+    member_name: str

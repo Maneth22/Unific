@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { useClientAuth } from '../context/ClientAuthContext'
 
 export default function ClientLoginPage() {
@@ -55,6 +55,10 @@ export default function ClientLoginPage() {
         <button type="submit" className="btn btn-primary" style={{ width: '100%' }} disabled={submitting}>
           {submitting ? 'Signing in…' : 'Sign in'}
         </button>
+
+        <div style={{ textAlign: 'center', marginTop: 14, fontSize: 12 }}>
+          <Link to="/client/signup">Don't have an account? Register your organisation</Link>
+        </div>
       </form>
     </div>
   )

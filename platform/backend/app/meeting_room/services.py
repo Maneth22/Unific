@@ -485,8 +485,12 @@ async def generate_report(
         content = await comms_agent.generate_session_report(
             db, transcript, identity_id=conversation.identity_id, room=RoomName.meeting_room, agent_name=AGENT_NAME
         )
-    else:
+    elif report_type == ReportType.satisfaction_analysis:
         content = await comms_agent.generate_satisfaction_analysis(
+            db, transcript, identity_id=conversation.identity_id, room=RoomName.meeting_room, agent_name=AGENT_NAME
+        )
+    else:
+        content = await comms_agent.generate_member_summary(
             db, transcript, identity_id=conversation.identity_id, room=RoomName.meeting_room, agent_name=AGENT_NAME
         )
 
