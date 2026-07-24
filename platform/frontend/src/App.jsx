@@ -3,20 +3,27 @@ import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom
 import { AuthProvider } from './context/AuthContext'
 import { ClientAuthProvider } from './context/ClientAuthContext'
 import ProtectedRoute from './routes/ProtectedRoute'
+import RequireAdmin from './routes/RequireAdmin'
 import ScopeRoute from './routes/ScopeRoute'
 import StaffDashboardLayout from './layouts/StaffDashboardLayout'
+import StaffPortalLayout from './layouts/StaffPortalLayout'
 import ClientDashboardLayout from './layouts/ClientDashboardLayout'
 import LoginPage from './pages/LoginPage'
 import ClientLoginPage from './pages/ClientLoginPage'
 import ClientSignupPage from './pages/ClientSignupPage'
 import MemberRegistrationPage from './pages/MemberRegistrationPage'
+import MeetingJoinPage from './pages/MeetingJoinPage'
 import StaffHomePage from './pages/StaffHomePage'
 import StaffManagementPage from './pages/StaffManagementPage'
 import StaffRegistrationRequestsPage from './pages/StaffRegistrationRequestsPage'
+import StaffTasksPage from './pages/StaffTasksPage'
+import StaffInboxPage from './pages/StaffInboxPage'
 import ClientAccountsPage from './pages/ClientAccountsPage'
 import ClientCommunitiesPage from './pages/ClientCommunitiesPage'
 import ClientCommunityDetailPage from './pages/ClientCommunityDetailPage'
 import ClientMeetingRoomPage from './pages/ClientMeetingRoomPage'
+import ClientInboxPage from './pages/ClientInboxPage'
+import ClientServicesPage from './pages/ClientServicesPage'
 import NotFoundPage from './pages/NotFoundPage'
 import AccountsRoomHome from './rooms/accounts/AccountsRoomHome'
 import ProfilesRoomHome from './rooms/profiles/ProfilesRoomHome'
@@ -49,13 +56,22 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
 
           <Route element={<ProtectedRoute />}>
-            <Route element={<StaffDashboardLayout />}>
-              <Route path="/" element={<StaffHomePage />} />
-              <Route path="/staff-management" element={<StaffManagementPage />} />
-              <Route path="/registration-requests" element={<StaffRegistrationRequestsPage />} />
-              <Route path="/accounts" element={<AccountsRoomHome />} />
-              <Route path="/profiles" element={<ProfilesRoomHome />} />
-              <Route path="/meeting-room" element={<MeetingRoomHome />} />
+            {/* Admin tier: the full dashboard — every existing room. */}
+            <Route element={<RequireAdmin />}>
+              <Route element={<StaffDashboardLayout />}>
+                <Route path="/" element={<StaffHomePage />} />
+                <Route path="/staff-management" element={<StaffManagementPage />} />
+                <Route path="/registration-requests" element={<StaffRegistrationRequestsPage />} />
+                <Route path="/accounts" element={<AccountsRoomHome />} />
+                <Route path="/profiles" element={<ProfilesRoomHome />} />
+                <Route path="/meeting-room" element={<MeetingRoomHome />} />
+              </Route>
+            </Route>
+
+            {/* Regular staff tier: tasks + inbox only, no client/cost data. */}
+            <Route element={<StaffPortalLayout />}>
+              <Route path="/portal" element={<StaffTasksPage />} />
+              <Route path="/portal/inbox" element={<StaffInboxPage />} />
             </Route>
           </Route>
         </Route>
@@ -70,12 +86,15 @@ export default function App() {
               <Route path="communities" element={<ClientCommunitiesPage />} />
               <Route path="communities/:groupId" element={<ClientCommunityDetailPage />} />
               <Route path="meeting-room" element={<ClientMeetingRoomPage />} />
+              <Route path="inbox" element={<ClientInboxPage />} />
+              <Route path="services" element={<ClientServicesPage />} />
             </Route>
           </Route>
         </Route>
 
         {/* Fully public — no auth wrapper at all, reached from a shared link. */}
         <Route path="/register/:token" element={<MemberRegistrationPage />} />
+        <Route path="/meeting-room/join/:token" element={<MeetingJoinPage />} />
 
         <Route path="/404" element={<NotFoundPage />} />
         <Route path="*" element={<Navigate to="/404" replace />} />

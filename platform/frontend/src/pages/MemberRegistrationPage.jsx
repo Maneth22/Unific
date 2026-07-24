@@ -10,7 +10,7 @@ export default function MemberRegistrationPage() {
   const { token } = useParams()
   const [groupInfo, setGroupInfo] = useState(null)
   const [loadError, setLoadError] = useState('')
-  const [form, setForm] = useState({ name: '', email: '', mobile_number: '', notes: '' })
+  const [form, setForm] = useState({ name: '', email: '', mobile_number: '', ilc_registration_number: '', notes: '' })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -67,6 +67,15 @@ export default function MemberRegistrationPage() {
           placeholder="+91…"
           value={form.mobile_number}
           onChange={(e) => setForm({ ...form, mobile_number: e.target.value })}
+          style={inputStyle}
+        />
+
+        <label style={labelStyle}>Your registration number</label>
+        <input
+          required
+          placeholder="Given to you by your ILC group"
+          value={form.ilc_registration_number}
+          onChange={(e) => setForm({ ...form, ilc_registration_number: e.target.value })}
           style={inputStyle}
         />
 

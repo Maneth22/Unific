@@ -9,6 +9,8 @@ to a single Admin role, not an oversight.
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -289,3 +291,33 @@ async def ai_usage_summary(staff: StaffUser = Depends(admin), db: AsyncSession =
     actually spending on LLM calls. Recording only; no limit is enforced
     yet, see docs/ARCHITECTURE.md for the intended enforcement hook."""
     return await llm_usage_service.get_usage_summary(db)
+
+
+@router.get("/ai-usage/by-client-need", response_model=list[schemas.UsageByClientNeedRow])
+async def ai_usage_by_client_need(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
+    """The LLM-tokens drill-down on the Accounts-Room landing dashboard:
+    per client, broken out by "need" (action — translation, community
+    management, etc.)."""
+    return await llm_usage_service.get_usage_by_client_and_action(db)
+
+
+@router.get("/cost-timeseries", response_model=list[schemas.UsageTimeseriesRow])
+async def cost_timeseries(
+    bucket: Literal["day", "week"] = "day",
+    group_by: Literal["model", "provider", "room", "action"] = "model",
+    staff: StaffUser = Depends(admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """LLM-token cost/usage over time, bucketed and grouped — the
+    Accounts-Room landing dashboard's system-cost timeline chart."""
+    return await llm_usage_service.get_usage_timeseries(db, bucket=bucket, group_by=group_by)
+
+
+@router.get("/financial-timeseries", response_model=list[schemas.FinancialTimeseriesRow])
+async def financial_timeseries(
+    bucket: Literal["day", "week"] = "day", staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)
+):
+    """Manual-expense (hosting, tools, subscriptions, ...) cost over time,
+    grouped by category — the non-LLM half of the same landing-dashboard
+    chart."""
+    return await services.financial_record_timeseries(db, bucket=bucket)

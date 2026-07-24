@@ -20,6 +20,7 @@ from app.database import Base
 class ActorType(str, enum.Enum):
     staff = "staff"
     client = "client"
+    client_staff = "client_staff"
     system = "system"
 
 

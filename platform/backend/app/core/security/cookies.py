@@ -19,6 +19,7 @@ REFRESH_COOKIE_NAME = "unific_refresh"
 
 STAFF_COOKIE_PATH = "/api/auth"
 CLIENT_COOKIE_PATH = "/api/profiles/client"
+CLIENT_STAFF_COOKIE_PATH = "/api/profiles/client-staff"
 
 
 def set_refresh_cookie(response: Response, raw_token: str, max_age_seconds: int, path: str = STAFF_COOKIE_PATH) -> None:

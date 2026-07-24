@@ -1,10 +1,16 @@
 import React, { useEffect, useState } from 'react'
+import { Navigate } from 'react-router-dom'
 import { useClientAuth } from '../context/ClientAuthContext'
 import { getAccountsOverview, fundMyAccount, transferMyCredit, getMyPermission, updateMyPermission } from '../api/clientProfiles'
 
 export default function ClientAccountsPage() {
-  const { clientUser } = useClientAuth()
+  const { clientUser, isOwner } = useClientAuth()
   const rootId = clientUser.identity_id
+
+  // Money/account-management is owner-only — the backend already 401s a
+  // client-staff token here (require_client_owner); redirect before ever
+  // making that call so staff land somewhere useful instead of an error.
+  if (!isOwner) return <Navigate to="/client/communities" replace />
 
   const [overview, setOverview] = useState(null)
   const [permission, setPermission] = useState(null)

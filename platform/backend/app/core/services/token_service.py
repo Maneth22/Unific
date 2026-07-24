@@ -30,8 +30,9 @@ async def issue_tokens(
     audience: TokenAudience,
     staff_user_id: str | None = None,
     client_user_id: str | None = None,
+    client_staff_user_id: str | None = None,
 ) -> IssuedTokens:
-    subject = staff_user_id if audience == "staff" else client_user_id
+    subject = {"staff": staff_user_id, "client": client_user_id, "client_staff": client_staff_user_id}[audience]
     assert subject is not None
 
     access_token = create_access_token(subject=subject, audience=audience)
@@ -43,6 +44,7 @@ async def issue_tokens(
             token_hash=hash_refresh_token(raw_refresh),
             staff_user_id=staff_user_id,
             client_user_id=client_user_id,
+            client_staff_user_id=client_staff_user_id,
             expires_at=expires_at,
         )
     )
@@ -76,12 +78,18 @@ async def rotate_refresh_token(db: AsyncSession, raw_token: str) -> tuple[Refres
     if existing.expires_at < utcnow():
         return None
 
-    audience: TokenAudience = "staff" if existing.staff_user_id else "client"
+    if existing.staff_user_id:
+        audience: TokenAudience = "staff"
+    elif existing.client_user_id:
+        audience = "client"
+    else:
+        audience = "client_staff"
     new_tokens = await issue_tokens(
         db,
         audience=audience,
         staff_user_id=existing.staff_user_id,
         client_user_id=existing.client_user_id,
+        client_staff_user_id=existing.client_staff_user_id,
     )
 
     existing.revoked_at = utcnow()
@@ -105,19 +113,12 @@ async def revoke_refresh_token(db: AsyncSession, raw_token: str) -> None:
 
 async def _revoke_all_for_subject(db: AsyncSession, token: RefreshToken) -> None:
     if token.staff_user_id:
-        result = await db.execute(
-            select(RefreshToken).where(
-                RefreshToken.staff_user_id == token.staff_user_id,
-                RefreshToken.revoked_at.is_(None),
-            )
-        )
+        column, value = RefreshToken.staff_user_id, token.staff_user_id
+    elif token.client_user_id:
+        column, value = RefreshToken.client_user_id, token.client_user_id
     else:
-        result = await db.execute(
-            select(RefreshToken).where(
-                RefreshToken.client_user_id == token.client_user_id,
-                RefreshToken.revoked_at.is_(None),
-            )
-        )
+        column, value = RefreshToken.client_staff_user_id, token.client_staff_user_id
+    result = await db.execute(select(RefreshToken).where(column == value, RefreshToken.revoked_at.is_(None)))
     for row in result.scalars().all():
         row.revoked_at = utcnow()
     await db.flush()

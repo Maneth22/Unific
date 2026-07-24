@@ -9,7 +9,11 @@ export const createWhatsAppLink = (phone_number, identity_id) =>
   apiClient.post('/meeting-room/whatsapp-links', { phone_number, identity_id }).then((r) => r.data)
 
 export const listMeetings = () => apiClient.get('/meeting-room/meetings').then((r) => r.data)
+export const getMeeting = (id) => apiClient.get(`/meeting-room/meetings/${id}`).then((r) => r.data)
 export const createMeeting = (payload) => apiClient.post('/meeting-room/meetings', payload).then((r) => r.data)
+export const joinMeeting = (id) => apiClient.post(`/meeting-room/meetings/${id}/join`).then((r) => r.data)
+export const endMeeting = (id) => apiClient.post(`/meeting-room/meetings/${id}/end`).then((r) => r.data)
+export const deleteMeeting = (id) => apiClient.delete(`/meeting-room/meetings/${id}`).then((r) => r.data)
 
 export const getConfigBoard = (identityId) => apiClient.get(`/meeting-room/config-board/${identityId}`).then((r) => r.data)
 export const updateConfigBoard = (identityId, payload) => apiClient.put(`/meeting-room/config-board/${identityId}`, payload).then((r) => r.data)

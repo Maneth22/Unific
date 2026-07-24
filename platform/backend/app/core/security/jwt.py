@@ -13,7 +13,7 @@ from jwt import InvalidTokenError
 
 from app.config import settings
 
-TokenAudience = Literal["staff", "client"]
+TokenAudience = Literal["staff", "client", "client_staff"]
 
 
 def create_access_token(subject: str, audience: TokenAudience, extra_claims: dict | None = None) -> str:

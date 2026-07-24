@@ -18,10 +18,10 @@ Swapping to real `ltree` later is a migration, not a redesign, since
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Numeric, String, Text, text
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -71,6 +71,8 @@ class Identity(Base):
     permission: Mapped["Permission"] = relationship(back_populates="identity", uselist=False, cascade="all, delete-orphan")
     profile_account: Mapped["ProfileAccount"] = relationship(back_populates="identity", uselist=False, cascade="all, delete-orphan")
     member_profile: Mapped["MemberProfile"] = relationship(back_populates="identity", uselist=False, cascade="all, delete-orphan")
+    client_org_profile: Mapped["ClientOrgProfile"] = relationship(back_populates="identity", uselist=False, cascade="all, delete-orphan")
+    ilc_group_profile: Mapped["IlcGroupProfile"] = relationship(back_populates="identity", uselist=False, cascade="all, delete-orphan")
 
 
 class PermissionScope(str, enum.Enum):
@@ -220,6 +222,108 @@ class MemberProfile(Base):
     registered_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     registered_via: Mapped[str] = mapped_column(String(50), default="public_form")
     source_invite_id: Mapped[str | None] = mapped_column(ForeignKey("profiles.group_invite.id", ondelete="SET NULL"), nullable=True)
+    # Which pre-issued IlcMemberRoster row this member's registration
+    # number was verified against — set at registration, never reassigned.
+    ilc_roster_entry_id: Mapped[str | None] = mapped_column(
+        ForeignKey("profiles.ilc_member_roster.id", ondelete="SET NULL"), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     identity: Mapped["Identity"] = relationship(back_populates="member_profile")
+
+
+class GroupCodeSequence(Base):
+    """Backs the system-issued, human-readable "Group ID" shown on client
+    orgs and ILC groups (e.g. `CLI-000001`, `ILC-000001`) — one row per
+    prefix, incremented atomically (`UPDATE ... SET next_value = next_value
+    + 1 RETURNING next_value`, see `services._generate_group_code`) so
+    concurrent creates never collide, unlike a `COUNT(*) + 1` scheme."""
+
+    __tablename__ = "group_code_sequence"
+    __table_args__ = {"schema": "profiles"}
+
+    prefix: Mapped[str] = mapped_column(String(16), primary_key=True)
+    next_value: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class ClientOrgProfile(Base):
+    """The client-organization-only fields, 1:1 with the org's root
+    `Identity` — kept as real typed columns (not `extra_info` JSONB) since
+    the shape is fixed and known, matching `MemberProfile`'s pattern of a
+    dedicated profile table per identity "kind" rather than overloading
+    `Identity` itself with kind-specific columns."""
+
+    __tablename__ = "client_org_profile"
+    __table_args__ = {"schema": "profiles"}
+
+    identity_id: Mapped[str] = mapped_column(ForeignKey("profiles.identity.id", ondelete="CASCADE"), primary_key=True)
+    group_code: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    entity_type: Mapped[str] = mapped_column(String(255), default="")
+    role_description: Mapped[str] = mapped_column(Text, default="")
+    abn_acnc_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    identity: Mapped["Identity"] = relationship(back_populates="client_org_profile")
+
+
+class IlcGroupProfile(Base):
+    """The ILC-community-group-only fields, 1:1 with the group's
+    `Identity` — same "dedicated profile table" pattern as
+    `ClientOrgProfile`/`MemberProfile`. `Identity.name` already holds
+    "Name (English)"; `name_hindi` here is the other half of the
+    bilingual-name requirement."""
+
+    __tablename__ = "ilc_group_profile"
+    __table_args__ = {"schema": "profiles"}
+
+    identity_id: Mapped[str] = mapped_column(ForeignKey("profiles.identity.id", ondelete="CASCADE"), primary_key=True)
+    group_code: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    name_hindi: Mapped[str] = mapped_column(String(255), default="")
+    registration_number: Mapped[str] = mapped_column(String(100), default="")
+    date_of_registration: Mapped[date | None] = mapped_column(Date, nullable=True)
+    application_signed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    registered_office: Mapped[str] = mapped_column(Text, default="")
+    area_of_operation: Mapped[str] = mapped_column(Text, default="")
+    governing_act: Mapped[str] = mapped_column(String(255), default="")
+    registering_authority: Mapped[str] = mapped_column(String(255), default="")
+    objective: Mapped[str] = mapped_column(Text, default="")
+    cooperative_type: Mapped[str] = mapped_column(String(255), default="")
+    bank_account: Mapped[str] = mapped_column(String(100), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    identity: Mapped["Identity"] = relationship(back_populates="ilc_group_profile")
+
+
+class IlcMemberRoster(Base):
+    """A client-assigned, pre-issued ILC registration number for one
+    community group — the allow-list the public member-registration form
+    checks against (see `services.create_member_profile`): unrecognized
+    numbers are rejected outright, and a number already claimed by an
+    existing member is rejected as a duplicate. Uniqueness is scoped per
+    group (`(group_identity_id, ilc_registration_number)`), not global —
+    two different ILC groups may reuse the same number, matching how
+    separate cooperative registrations are actually numbered."""
+
+    __tablename__ = "ilc_member_roster"
+    __table_args__ = (
+        Index(
+            "uq_ilc_member_roster_group_number",
+            "group_identity_id",
+            "ilc_registration_number",
+            unique=True,
+        ),
+        {"schema": "profiles"},
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    group_identity_id: Mapped[str] = mapped_column(ForeignKey("profiles.identity.id", ondelete="CASCADE"), nullable=False, index=True)
+    ilc_registration_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_claimed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    claimed_by_identity_id: Mapped[str | None] = mapped_column(
+        ForeignKey("profiles.identity.id", ondelete="SET NULL"), nullable=True
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by_client_id: Mapped[str | None] = mapped_column(ForeignKey("core.client_user.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)

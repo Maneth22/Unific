@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import CostDashboardTab from './CostDashboardTab'
 import RegistryPanel from './RegistryPanel'
 import FinancialDashboard from './FinancialDashboard'
 import ApiMonitorPanel from './ApiMonitorPanel'
@@ -7,6 +8,7 @@ import ArchiveLocker from './ArchiveLocker'
 import AiUsagePanel from './AiUsagePanel'
 
 const TABS = [
+  { key: 'dashboard', label: 'Dashboard', Component: CostDashboardTab },
   { key: 'registry', label: 'Account Registry', Component: RegistryPanel },
   { key: 'financial', label: 'Financial Dashboard', Component: FinancialDashboard },
   { key: 'ai-usage', label: 'AI Usage', Component: AiUsagePanel },
@@ -16,7 +18,7 @@ const TABS = [
 ]
 
 export default function AccountsRoomHome() {
-  const [tab, setTab] = useState('registry')
+  const [tab, setTab] = useState('dashboard')
   const Active = TABS.find((t) => t.key === tab).Component
 
   return (

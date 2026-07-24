@@ -1,13 +1,12 @@
 """Staff (master dashboard) authentication.
 
-There is deliberately no open self-registration endpoint for staff: every
-staff account is a full Admin (there is no per-room grant model any more —
-see `app.core.security.dependencies.require_admin`), so master-dashboard
-accounts are provisioned, not signed up for. The very first staff account
-is created via `/bootstrap` (which refuses to run once any staff account
-exists); every subsequent staff account is created by an existing Admin
-via `/staff` — any Admin can provision another Admin, there is no separate
-gatekeeper role.
+There is deliberately no open self-registration endpoint for staff: master-
+dashboard accounts are provisioned, not signed up for. The very first
+staff account is created via `/bootstrap` (which refuses to run once any
+staff account exists) and is always `tier=admin`; every subsequent staff
+account is created by an existing Admin via `/staff` (`Depends(require_admin)`)
+— an Admin can provision either another Admin or a regular Staff account
+(see `app.core.security.dependencies` for the two-tier model).
 
 Clients, unlike staff, DO have a self-registration path — see
 `app.profiles.router`'s public router (`POST /api/profiles/public/client-signup`)
@@ -27,10 +26,10 @@ from app.auth.schemas import (
     StaffOut,
 )
 from app.core.models.audit import ActorType
-from app.core.models.staff import RefreshToken, StaffUser
+from app.core.models.staff import RefreshToken, StaffCategory, StaffTier, StaffUser
 from app.core.services import audit_service
 from app.core.security.cookies import REFRESH_COOKIE_NAME, clear_refresh_cookie, set_refresh_cookie
-from app.core.security.dependencies import client_ip, get_current_staff_user
+from app.core.security.dependencies import client_ip, require_admin, require_any_staff
 from app.core.security.password import hash_password, verify_password
 from app.core.security.rate_limit import is_locked_out, record_login_attempt
 from app.core.security.tokens import hash_refresh_token
@@ -50,6 +49,7 @@ async def bootstrap(req: StaffBootstrapRequest, response: Response, db: AsyncSes
         email=req.email.lower(),
         password_hash=hash_password(req.password),
         full_name=req.full_name,
+        tier=StaffTier.admin,
     )
     db.add(staff)
     await db.flush()
@@ -157,26 +157,39 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
 
 
 @router.get("/me", response_model=StaffOut)
-async def me(current_staff: StaffUser = Depends(get_current_staff_user)):
+async def me(current_staff: StaffUser = Depends(require_any_staff)):
     return StaffOut.model_validate(current_staff)
 
 
 @router.post("/staff", response_model=StaffOut, status_code=status.HTTP_201_CREATED)
 async def create_staff(
     req: StaffCreateRequest,
-    current_staff: StaffUser = Depends(get_current_staff_user),
+    current_staff: StaffUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Any active Admin can provision another Admin — there is no separate
-    gatekeeper role since the per-room grant model was collapsed."""
+    """Only an Admin reaches this route at all (`Depends(require_admin)`),
+    so an Admin may provision either another Admin or a regular Staff
+    account — there's no separate gatekeeper role above Admin."""
     existing = await db.execute(select(StaffUser).where(StaffUser.email == req.email.lower()))
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+
+    try:
+        tier = StaffTier(req.tier)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="tier must be 'admin' or 'staff'") from exc
+
+    if req.category_id is not None:
+        category = await db.get(StaffCategory, req.category_id)
+        if category is None:
+            raise HTTPException(status_code=400, detail="Unknown category_id")
 
     new_staff = StaffUser(
         email=req.email.lower(),
         password_hash=hash_password(req.password),
         full_name=req.full_name,
+        tier=tier,
+        category_id=req.category_id,
     )
     db.add(new_staff)
     await db.flush()
@@ -188,7 +201,7 @@ async def create_staff(
         action="staff.create",
         entity_type="staff_user",
         entity_id=new_staff.id,
-        after={"email": new_staff.email, "full_name": new_staff.full_name},
+        after={"email": new_staff.email, "full_name": new_staff.full_name, "tier": tier.value},
     )
     await db.commit()
     return StaffOut.model_validate(new_staff)

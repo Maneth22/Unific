@@ -65,6 +65,7 @@ export function AuthProvider({ children }) {
       staff,
       loading,
       isAuthenticated: !!staff,
+      isAdmin: staff?.tier === 'admin',
       login,
       bootstrap,
       logout,

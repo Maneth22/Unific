@@ -11,9 +11,10 @@ with `room=RoomName.meeting_room`) — only room-specific business data
 from __future__ import annotations
 
 import enum
+import secrets
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -93,6 +94,7 @@ class Message(Base):
 
 class MeetingStatus(str, enum.Enum):
     scheduled = "scheduled"
+    live = "live"
     completed = "completed"
     cancelled = "cancelled"
 
@@ -102,13 +104,111 @@ class Meeting(Base):
     __table_args__ = {"schema": "meeting_room"}
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
-    host_identity_id: Mapped[str] = mapped_column(ForeignKey("profiles.identity.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Nullable: a staff-only meeting (meeting_kind="staff") has no
+    # identity-tree node to host it — staff accounts aren't identity
+    # nodes at all. Set for "client_org"/"community" meetings.
+    host_identity_id: Mapped[str | None] = mapped_column(ForeignKey("profiles.identity.id", ondelete="CASCADE"), nullable=True, index=True)
     scheduled_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     translate_live: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[MeetingStatus] = mapped_column(Enum(MeetingStatus, name="meeting_status"), default=MeetingStatus.scheduled)
     notes: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str | None] = mapped_column(ForeignKey("core.staff_user.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    # The LiveKit room this meeting maps to. Derived from `id` at creation
+    # time (`f"meeting-{id}"`) rather than a random slug — since `id` is
+    # already a unique uuid, this makes collisions structurally impossible
+    # with no separate uniqueness check or retry loop needed.
+    room_name: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    participants: Mapped[list["MeetingParticipant"]] = relationship(
+        back_populates="meeting", cascade="all, delete-orphan"
+    )
+
+
+class MeetingParticipant(Base):
+    """One row per person invited to a meeting — either a node in the
+    profiles identity tree (`identity_id`: a client org, sub-group, or
+    community member) or a staff account (`staff_user_id`). Staff are not
+    identity-tree nodes, so they need their own column rather than being
+    shoehorned into `identity_id` — the CHECK constraint below enforces
+    exactly one of the two is set per row."""
+
+    __tablename__ = "meeting_participant"
+    __table_args__ = (
+        CheckConstraint(
+            "(identity_id IS NOT NULL) != (staff_user_id IS NOT NULL)",
+            name="one_actor",
+        ),
+        Index(
+            "uq_meeting_participant_identity",
+            "meeting_id",
+            "identity_id",
+            unique=True,
+            postgresql_where=text("identity_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_meeting_participant_staff",
+            "meeting_id",
+            "staff_user_id",
+            unique=True,
+            postgresql_where=text("staff_user_id IS NOT NULL"),
+        ),
+        {"schema": "meeting_room"},
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    meeting_id: Mapped[str] = mapped_column(
+        ForeignKey("meeting_room.meeting.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    identity_id: Mapped[str | None] = mapped_column(
+        ForeignKey("profiles.identity.id", ondelete="CASCADE"), nullable=True
+    )
+    staff_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("core.staff_user.id", ondelete="CASCADE"), nullable=True
+    )
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    left_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    meeting: Mapped["Meeting"] = relationship(back_populates="participants")
+    invite: Mapped["MeetingInvite | None"] = relationship(
+        back_populates="participant", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class MeetingInvite(Base):
+    """A passwordless, per-participant, time-bound join link — used by
+    WhatsApp-only community members (no dashboard login) and, for
+    convenience, every identity-side participant. Deliberately not a
+    `profiles.GroupInvite` (that model is a durable, one-active-per-
+    identity community registration link with rotate-not-mutate
+    semantics); a meeting invite is single-meeting, single-participant,
+    and expires with the meeting, so it gets its own table rather than
+    overloading GroupInvite's different lifecycle."""
+
+    __tablename__ = "meeting_invite"
+    __table_args__ = {"schema": "meeting_room"}
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    meeting_id: Mapped[str] = mapped_column(
+        ForeignKey("meeting_room.meeting.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    participant_id: Mapped[str] = mapped_column(
+        ForeignKey("meeting_room.meeting_participant.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    token: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True, default=lambda: secrets.token_urlsafe(24)
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    participant: Mapped["MeetingParticipant"] = relationship(back_populates="invite")
 
 
 class WhatsAppLink(Base):

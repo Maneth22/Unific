@@ -26,6 +26,16 @@ export const recordConsent = (id, payload) => apiClient.post(`/profiles/identiti
 export const createClientAccount = (identityId, payload) =>
   apiClient.post(`/profiles/identities/${identityId}/client-account`, payload).then((r) => r.data)
 
+// --- Client orgs (staff-side) ---
+export const listClientOrgIdentities = () => apiClient.get('/profiles/identities/client-orgs').then((r) => r.data)
+export const createClientOrg = (payload) => apiClient.post('/profiles/client-orgs', payload).then((r) => r.data)
+export const getClientOrgProfile = (identityId) =>
+  apiClient.get(`/profiles/identities/${identityId}/client-org-profile`).then((r) => r.data)
+export const updateClientOrgProfile = (identityId, payload) =>
+  apiClient.put(`/profiles/identities/${identityId}/client-org-profile`, payload).then((r) => r.data)
+export const getIlcGroupProfile = (identityId) =>
+  apiClient.get(`/profiles/identities/${identityId}/ilc-group-profile`).then((r) => r.data)
+
 // --- Client registration requests (Admin review queue) ---
 export const listRegistrationRequests = (status) =>
   apiClient.get('/profiles/registration-requests', { params: status ? { status_filter: status } : {} }).then((r) => r.data)

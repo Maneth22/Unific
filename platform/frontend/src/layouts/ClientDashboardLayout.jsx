@@ -3,7 +3,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 import { useClientAuth } from '../context/ClientAuthContext'
 
 export default function ClientDashboardLayout() {
-  const { clientUser, logout } = useClientAuth()
+  const { clientUser, isOwner, logout } = useClientAuth()
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
@@ -22,49 +22,11 @@ export default function ClientDashboardLayout() {
         </div>
 
         <nav style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
-          <NavLink
-            to="/client"
-            end
-            style={({ isActive }) => ({
-              padding: '9px 10px',
-              borderRadius: 8,
-              fontSize: 13,
-              fontWeight: 600,
-              textDecoration: 'none',
-              color: isActive ? 'white' : 'var(--ink)',
-              background: isActive ? 'var(--slate)' : 'transparent',
-            })}
-          >
-            Accounts
-          </NavLink>
-          <NavLink
-            to="/client/communities"
-            style={({ isActive }) => ({
-              padding: '9px 10px',
-              borderRadius: 8,
-              fontSize: 13,
-              fontWeight: 600,
-              textDecoration: 'none',
-              color: isActive ? 'white' : 'var(--ink)',
-              background: isActive ? 'var(--slate)' : 'transparent',
-            })}
-          >
-            Profiles
-          </NavLink>
-          <NavLink
-            to="/client/meeting-room"
-            style={({ isActive }) => ({
-              padding: '9px 10px',
-              borderRadius: 8,
-              fontSize: 13,
-              fontWeight: 600,
-              textDecoration: 'none',
-              color: isActive ? 'white' : 'var(--ink)',
-              background: isActive ? 'var(--slate)' : 'transparent',
-            })}
-          >
-            Meeting Room
-          </NavLink>
+          {isOwner && <NavItem to="/client" end label="Accounts" />}
+          <NavItem to="/client/communities" label="Profiles" />
+          <NavItem to="/client/meeting-room" label="Meeting Room" />
+          <NavItem to="/client/services" label="Services" />
+          <NavItem to="/client/inbox" label="Notices / Inbox" />
         </nav>
 
         <div style={{ borderTop: '1px solid var(--line)', paddingTop: 12, fontSize: 12 }}>
@@ -80,5 +42,25 @@ export default function ClientDashboardLayout() {
         <Outlet />
       </main>
     </div>
+  )
+}
+
+function NavItem({ to, label, end }) {
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      style={({ isActive }) => ({
+        padding: '9px 10px',
+        borderRadius: 8,
+        fontSize: 13,
+        fontWeight: 600,
+        textDecoration: 'none',
+        color: isActive ? 'white' : 'var(--ink)',
+        background: isActive ? 'var(--slate)' : 'transparent',
+      })}
+    >
+      {label}
+    </NavLink>
   )
 }

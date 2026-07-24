@@ -11,18 +11,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts import schemas as accounts_schemas
+from app.config import settings
 from app.core.models.archive import ArchiveShelf
 from app.core.models.audit import ActorType
 from app.core.models.client import ClientUser
 from app.core.models.common import RoomName
 from app.core.models.staff import StaffUser
 from app.core.providers.base import ProviderError
-from app.core.providers.factory import get_comms_agent, get_reply_generator, get_whatsapp_provider
-from app.core.security.dependencies import require_admin
+from app.core.providers.factory import get_comms_agent, get_reply_generator, get_video_provider, get_whatsapp_provider
+from app.core.security.dependencies import require_admin, require_any_staff
 from app.core.services import archive_service, scope_service
 from app.database import get_db
 from app.meeting_room import schemas, services
 from app.meeting_room.models import Conversation, ReportType, WhatsAppLink
+from app.tasking import services as tasking_services
 from app.profiles.models import Permission
 from app.profiles.security import get_current_client_user
 from app.profiles.services import update_own_permission
@@ -309,25 +311,192 @@ async def client_list_reports(
     return await services.list_reports(db, conversation_id)
 
 
+# --- Client meetings ---
+
+@client_router.get("/meetings", response_model=list[schemas.MeetingOut])
+async def client_list_meetings(client: ClientUser = Depends(get_current_client_user), db: AsyncSession = Depends(get_db)):
+    identity_ids = await scope_service.descendant_ids(db, client.identity_id, include_self=True)
+    return await services.list_client_meetings(db, identity_ids)
+
+
+@client_router.get("/meetings/{meeting_id}", response_model=schemas.MeetingOut)
+async def client_get_meeting(
+    meeting_id: str, client: ClientUser = Depends(get_current_client_user), db: AsyncSession = Depends(get_db)
+):
+    meeting = await services.get_meeting_with_participants(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    participant_identity_ids = [p.identity_id for p in meeting.participants if p.identity_id]
+    is_scoped = any(
+        [
+            await scope_service.is_ancestor_or_self(db, root_id=client.identity_id, target_id=pid)
+            for pid in participant_identity_ids
+        ]
+    )
+    if not is_scoped:
+        raise HTTPException(status_code=403, detail="This meeting is outside your account's scope")
+    return meeting
+
+
+@client_router.post("/meetings/{meeting_id}/join", response_model=schemas.JoinResponse)
+async def client_join_meeting(
+    meeting_id: str,
+    req: schemas.ClientJoinRequest,
+    client: ClientUser = Depends(get_current_client_user),
+    db: AsyncSession = Depends(get_db),
+):
+    target_identity_id = req.identity_id or client.identity_id
+    if not await scope_service.is_ancestor_or_self(db, root_id=client.identity_id, target_id=target_identity_id):
+        raise HTTPException(status_code=403, detail="This identity is outside your account's scope")
+    try:
+        meeting, token = await services.mint_client_join(
+            db, meeting_id=meeting_id, identity_id=target_identity_id, video_provider=get_video_provider()
+        )
+    except services.MeetingRoomError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return _join_response(meeting, token)
+
+
+# ============================= Public routes =============================
+# No auth dependency anywhere in this router — mirrors app.profiles.router's
+# public_router, used here for a WhatsApp-only community member (or anyone
+# else holding a valid meeting invite link) to join without a login.
+
+public_router = APIRouter(prefix="/api/meeting-room/public", tags=["meeting_room:public"])
+
+
+@public_router.get("/join/{token}", response_model=schemas.PublicMeetingInfoOut)
+async def public_get_join_info(token: str, db: AsyncSession = Depends(get_db)):
+    info = await services.get_public_join_info(db, token)
+    if info is None:
+        raise HTTPException(status_code=404, detail="This meeting link is invalid or has expired")
+    meeting, _participant, identity = info
+    return schemas.PublicMeetingInfoOut(
+        meeting_id=meeting.id,
+        scheduled_at=meeting.scheduled_at,
+        status=meeting.status.value,
+        participant_name=identity.name if identity is not None else "Guest",
+    )
+
+
+@public_router.post("/join/{token}", response_model=schemas.JoinResponse)
+async def public_join_meeting(token: str, db: AsyncSession = Depends(get_db)):
+    try:
+        meeting, jwt_token = await services.mint_public_join(db, token=token, video_provider=get_video_provider())
+    except services.MeetingRoomError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return _join_response(meeting, jwt_token)
+
+
 # --- Meetings ---
+
+def _invite_url(token: str) -> str:
+    return f"{settings.frontend_base_url.rstrip('/')}/meeting-room/join/{token}"
+
+
+def _join_response(meeting, token: str) -> schemas.JoinResponse:
+    return schemas.JoinResponse(livekit_url=settings.livekit_url, token=token, room_name=meeting.room_name)
+
+
+async def _meeting_detail_out(db: AsyncSession, meeting) -> schemas.MeetingDetailOut:
+    invites = await services.get_invites_for_meeting(db, meeting.id)
+    invite_urls = {inv.participant_id: _invite_url(inv.token) for inv in invites}
+    return schemas.MeetingDetailOut(
+        **schemas.MeetingOut.model_validate(meeting).model_dump(),
+        participants=[schemas.MeetingParticipantOut.model_validate(p) for p in meeting.participants],
+        invite_urls=invite_urls,
+    )
+
 
 @router.get("/meetings", response_model=list[schemas.MeetingOut])
 async def list_meetings(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.list_meetings(db)
 
 
+@router.get("/meetings/{meeting_id}", response_model=schemas.MeetingDetailOut)
+async def get_meeting(meeting_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
+    meeting = await services.get_meeting_with_participants(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return await _meeting_detail_out(db, meeting)
+
+
 @router.post("/meetings", response_model=schemas.MeetingOut, status_code=status.HTTP_201_CREATED)
 async def create_meeting(req: schemas.MeetingCreate, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
-    meeting = await services.schedule_meeting(
-        db,
-        host_identity_id=req.host_identity_id,
-        scheduled_at=req.scheduled_at,
-        translate_live=req.translate_live,
-        staff_id=staff.id,
-        notes=req.notes,
-    )
+    try:
+        meeting = await services.schedule_meeting(
+            db,
+            host_identity_id=req.host_identity_id,
+            scheduled_at=req.scheduled_at,
+            translate_live=req.translate_live,
+            staff_id=staff.id,
+            notes=req.notes,
+            participant_identity_ids=req.participant_identity_ids,
+            staff_participant_ids=req.staff_participant_ids,
+            meeting_kind=req.meeting_kind,
+            video_provider=get_video_provider(),
+        )
+    except services.MeetingRoomError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # "Select who gets the meeting link in their inbox" — cross-room
+    # orchestration lives here in the router, not in meeting_room/services.py,
+    # matching this codebase's convention that routers (not services) cross
+    # room boundaries (see profiles/router.py's public registration flow).
+    for staff_participant_id in req.staff_participant_ids:
+        await tasking_services.send_message(
+            db,
+            sender_staff_id=staff.id,
+            recipient_staff_id=staff_participant_id,
+            subject="Meeting invitation",
+            body=f"You've been invited to a meeting scheduled for {meeting.scheduled_at.isoformat()}.",
+            related_meeting_id=meeting.id,
+        )
+
     await db.commit()
     return meeting
+
+
+@router.post("/meetings/{meeting_id}/join", response_model=schemas.JoinResponse)
+async def join_meeting(meeting_id: str, staff: StaffUser = Depends(require_any_staff), db: AsyncSession = Depends(get_db)):
+    """Any active staff account — admin or not — can join a meeting they
+    were invited to; scheduling/managing meetings stays admin-only."""
+    try:
+        meeting, token = await services.mint_staff_join(
+            db, meeting_id=meeting_id, staff_id=staff.id, staff_name=staff.full_name, video_provider=get_video_provider()
+        )
+    except services.MeetingRoomError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return _join_response(meeting, token)
+
+
+@router.post("/meetings/{meeting_id}/end", response_model=schemas.MeetingOut)
+async def end_meeting(meeting_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
+    try:
+        meeting = await services.end_meeting(
+            db, meeting_id=meeting_id, staff_id=staff.id, video_provider=get_video_provider()
+        )
+    except services.MeetingRoomError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return meeting
+
+
+@router.delete("/meetings/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_meeting(meeting_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
+    """Force-closes the LiveKit room (so it isn't left running) and removes
+    the meeting entirely — for a scheduled meeting that's no longer needed,
+    or a live one that should be shut down and cleared out, not just ended."""
+    try:
+        await services.delete_meeting(
+            db, meeting_id=meeting_id, staff_id=staff.id, video_provider=get_video_provider()
+        )
+    except services.MeetingRoomError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
 
 
 # --- Config Board (a view over profiles.permission's reply_* fields) ---

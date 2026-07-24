@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, EmailStr, Field
@@ -134,6 +134,7 @@ class ClientOut(BaseModel):
     email: str
     full_name: str
     identity_id: str
+    is_owner: bool
     is_active: bool
 
     model_config = {"from_attributes": True}
@@ -143,6 +144,33 @@ class ClientAccessTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     client: ClientOut
+
+
+class ClientStaffCreate(BaseModel):
+    email: str
+    password: str = Field(min_length=12)
+    full_name: str
+
+
+class ClientStaffLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class ClientStaffOut(BaseModel):
+    id: str
+    email: str
+    full_name: str
+    identity_id: str
+    is_active: bool
+
+    model_config = {"from_attributes": True}
+
+
+class ClientStaffAccessTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    client_staff: ClientStaffOut
 
 
 # --- AI usage ---
@@ -207,8 +235,102 @@ class ClientAccountsOverviewOut(BaseModel):
 # --- Community groups & invites ---
 
 class GroupCreateRequest(BaseModel):
+    """Creates an ILC community group under the client's own org — the
+    full registration-record field set the client provides up front."""
+
     name: str
     parent_id: str
+    name_hindi: str = ""
+    registration_number: str = ""
+    date_of_registration: date | None = None
+    application_signed: bool = False
+    registered_office: str = ""
+    area_of_operation: str = ""
+    governing_act: str = ""
+    registering_authority: str = ""
+    objective: str = ""
+    cooperative_type: str = ""
+    bank_account: str = ""
+
+
+class IlcGroupProfileOut(BaseModel):
+    identity_id: str
+    group_code: str
+    name_hindi: str
+    registration_number: str
+    date_of_registration: date | None
+    application_signed: bool
+    registered_office: str
+    area_of_operation: str
+    governing_act: str
+    registering_authority: str
+    objective: str
+    cooperative_type: str
+    bank_account: str
+
+    model_config = {"from_attributes": True}
+
+
+class ClientOrgCreate(BaseModel):
+    """Admin-only direct client-org creation (the alternative to the
+    public signup + approval flow) — the exact field set: a system-issued
+    Group ID (generated, not supplied), Name, Entity type, Role, and an
+    optional ABN/ACNC number left blank for now."""
+
+    name: str
+    entity_type: str = ""
+    role_description: str = ""
+    abn_acnc_number: str | None = None
+
+
+class ClientOrgProfileOut(BaseModel):
+    identity_id: str
+    group_code: str
+    entity_type: str
+    role_description: str
+    abn_acnc_number: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class ClientOrgProfileUpdate(BaseModel):
+    entity_type: str | None = None
+    role_description: str | None = None
+    abn_acnc_number: str | None = None
+
+
+class RosterAddRequest(BaseModel):
+    numbers: list[str] = Field(min_length=1)
+
+
+class ClientNoticeCreate(BaseModel):
+    subject: str = ""
+    body: str
+
+
+class ClientInboxMessageOut(BaseModel):
+    id: str
+    sender_staff_id: str | None
+    sender_client_id: str | None
+    subject: str
+    body: str
+    related_meeting_id: str | None
+    read_at: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class RosterEntryOut(BaseModel):
+    id: str
+    group_identity_id: str
+    ilc_registration_number: str
+    is_claimed: bool
+    claimed_by_identity_id: str | None
+    claimed_at: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class GroupInviteOut(BaseModel):
@@ -291,6 +413,7 @@ class MemberRegistrationRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     email: str = ""
     mobile_number: str = Field(min_length=1, max_length=32)
+    ilc_registration_number: str = Field(min_length=1, max_length=64)
     extra_info: dict = {}
 
 

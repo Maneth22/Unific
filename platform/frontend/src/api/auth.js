@@ -24,7 +24,7 @@ export async function staffMe() {
   return data
 }
 
-export async function createStaff(email, password, full_name) {
-  const { data } = await apiClient.post('/auth/staff/staff', { email, password, full_name })
+export async function createStaff(email, password, full_name, tier = 'staff', category_id = null) {
+  const { data } = await apiClient.post('/auth/staff/staff', { email, password, full_name, tier, category_id })
   return data
 }

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,6 +76,80 @@ async def get_usage_summary(
         {
             "identity_id": row.identity_id,
             "identity_name": row.name,
+            "call_count": row.call_count,
+            "total_tokens": row.total_tokens,
+            "total_cost": row.total_cost,
+        }
+        for row in result.all()
+    ]
+
+
+async def get_usage_timeseries(
+    db: AsyncSession,
+    *,
+    since: datetime | None = None,
+    bucket: Literal["day", "week"] = "day",
+    group_by: Literal["model", "provider", "room", "action"] = "model",
+) -> list[dict]:
+    """Cost/tokens over time, bucketed and grouped by service — backs the
+    admin Accounts-Room landing dashboard's "system costs over a
+    timeline, per service" chart."""
+    group_column = {
+        "model": LlmUsageRecord.model,
+        "provider": LlmUsageRecord.provider,
+        "room": LlmUsageRecord.room,
+        "action": LlmUsageRecord.action,
+    }[group_by]
+
+    period = func.date_trunc(bucket, LlmUsageRecord.created_at).label("period")
+    stmt = (
+        select(
+            period,
+            group_column.label("group_value"),
+            func.coalesce(func.sum(LlmUsageRecord.total_tokens), 0).label("total_tokens"),
+            func.coalesce(func.sum(LlmUsageRecord.estimated_cost), 0).label("total_cost"),
+        )
+        .group_by(period, group_column)
+        .order_by(period)
+    )
+    if since is not None:
+        stmt = stmt.where(LlmUsageRecord.created_at >= since)
+    result = await db.execute(stmt)
+    return [
+        {
+            "period": row.period,
+            "group_value": row.group_value.value if hasattr(row.group_value, "value") else row.group_value,
+            "total_tokens": row.total_tokens,
+            "total_cost": row.total_cost,
+        }
+        for row in result.all()
+    ]
+
+
+async def get_usage_by_client_and_action(db: AsyncSession, since: datetime | None = None) -> list[dict]:
+    """The LLM-tokens drill-down: per client identity, broken out by
+    `action` (the "need" — translation, community management, etc.)."""
+    stmt = (
+        select(
+            LlmUsageRecord.identity_id,
+            Identity.name,
+            LlmUsageRecord.action,
+            func.count(LlmUsageRecord.id).label("call_count"),
+            func.coalesce(func.sum(LlmUsageRecord.total_tokens), 0).label("total_tokens"),
+            func.coalesce(func.sum(LlmUsageRecord.estimated_cost), 0).label("total_cost"),
+        )
+        .outerjoin(Identity, Identity.id == LlmUsageRecord.identity_id)
+        .group_by(LlmUsageRecord.identity_id, Identity.name, LlmUsageRecord.action)
+        .order_by(func.coalesce(func.sum(LlmUsageRecord.total_tokens), 0).desc())
+    )
+    if since is not None:
+        stmt = stmt.where(LlmUsageRecord.created_at >= since)
+    result = await db.execute(stmt)
+    return [
+        {
+            "identity_id": row.identity_id,
+            "identity_name": row.name,
+            "action": row.action,
             "call_count": row.call_count,
             "total_tokens": row.total_tokens,
             "total_cost": row.total_cost,

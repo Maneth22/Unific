@@ -3,11 +3,26 @@ import { Link } from 'react-router-dom'
 import { createCommunity, listCommunities, regenerateInvite } from '../api/clientProfiles'
 import { useClientAuth } from '../context/ClientAuthContext'
 
+const EMPTY_FORM = {
+  name: '',
+  name_hindi: '',
+  registration_number: '',
+  date_of_registration: '',
+  application_signed: false,
+  registered_office: '',
+  area_of_operation: '',
+  governing_act: '',
+  registering_authority: '',
+  objective: '',
+  cooperative_type: '',
+  bank_account: '',
+}
+
 export default function ClientCommunitiesPage() {
   const { clientUser } = useClientAuth()
   const [communities, setCommunities] = useState([])
   const [showCreate, setShowCreate] = useState(false)
-  const [name, setName] = useState('')
+  const [form, setForm] = useState(EMPTY_FORM)
   const [error, setError] = useState('')
   const [copiedId, setCopiedId] = useState('')
   const [busyId, setBusyId] = useState('')
@@ -22,8 +37,12 @@ export default function ClientCommunitiesPage() {
     e.preventDefault()
     setError('')
     try {
-      await createCommunity(name, clientUser.identity_id)
-      setName('')
+      await createCommunity({
+        ...form,
+        parent_id: clientUser.identity_id,
+        date_of_registration: form.date_of_registration || null,
+      })
+      setForm(EMPTY_FORM)
       setShowCreate(false)
       await refresh()
     } catch (err) {
@@ -57,34 +76,43 @@ export default function ClientCommunitiesPage() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <h1 style={{ fontSize: 20, marginBottom: 4 }}>Communities</h1>
+          <h1 style={{ fontSize: 20, marginBottom: 4 }}>ILC Communities</h1>
           <p style={{ color: 'var(--sub)', marginBottom: 20 }}>
-            Each community has its own registration link — share it and members register
-            themselves, then get redirected straight into WhatsApp with their personal agent.
+            Each ILC group has its own registration link and a system-issued Group ID — share the
+            link and members register themselves (verified against the roster you set for that
+            group), then get redirected straight into WhatsApp with their personal agent.
           </p>
         </div>
         <button className="btn btn-primary" onClick={() => setShowCreate(!showCreate)}>
-          {showCreate ? 'Cancel' : '+ Create community group'}
+          {showCreate ? 'Cancel' : '+ Create ILC group'}
         </button>
       </div>
 
       {error && <div className="badge badge-alert" style={{ display: 'block', marginBottom: 14, padding: '8px 12px' }}>{error}</div>}
 
       {showCreate && (
-        <form onSubmit={handleCreate} className="card" style={{ padding: 16, marginBottom: 20, display: 'flex', gap: 8 }}>
-          <input
-            required
-            placeholder="e.g. Sandahkal Group India"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            style={{ flex: 1, padding: 8, border: '1px solid var(--line)', borderRadius: 8 }}
-          />
-          <button type="submit" className="btn btn-primary">Create</button>
+        <form onSubmit={handleCreate} className="card" style={{ padding: 16, marginBottom: 20, display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
+          <input required placeholder="Name (English) — e.g. ILC Sundarkhal" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={inputStyle} />
+          <input placeholder="Name (Hindi)" value={form.name_hindi} onChange={(e) => setForm({ ...form, name_hindi: e.target.value })} style={inputStyle} />
+          <input placeholder="Registration number" value={form.registration_number} onChange={(e) => setForm({ ...form, registration_number: e.target.value })} style={inputStyle} />
+          <input type="date" placeholder="Date of registration" value={form.date_of_registration} onChange={(e) => setForm({ ...form, date_of_registration: e.target.value })} style={inputStyle} />
+          <input placeholder="Registered office" value={form.registered_office} onChange={(e) => setForm({ ...form, registered_office: e.target.value })} style={inputStyle} />
+          <input placeholder="Area of operation" value={form.area_of_operation} onChange={(e) => setForm({ ...form, area_of_operation: e.target.value })} style={inputStyle} />
+          <input placeholder="Governing Act" value={form.governing_act} onChange={(e) => setForm({ ...form, governing_act: e.target.value })} style={inputStyle} />
+          <input placeholder="Registering authority" value={form.registering_authority} onChange={(e) => setForm({ ...form, registering_authority: e.target.value })} style={inputStyle} />
+          <input placeholder="Cooperative type" value={form.cooperative_type} onChange={(e) => setForm({ ...form, cooperative_type: e.target.value })} style={inputStyle} />
+          <input placeholder="Bank account" value={form.bank_account} onChange={(e) => setForm({ ...form, bank_account: e.target.value })} style={inputStyle} />
+          <textarea placeholder="Objective" value={form.objective} onChange={(e) => setForm({ ...form, objective: e.target.value })} style={{ ...inputStyle, gridColumn: '1 / -1', minHeight: 60, fontFamily: 'inherit' }} />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+            <input type="checkbox" checked={form.application_signed} onChange={(e) => setForm({ ...form, application_signed: e.target.checked })} />
+            Application signed
+          </label>
+          <button type="submit" className="btn btn-primary" style={{ gridColumn: '1 / -1' }}>Create</button>
         </form>
       )}
 
       {communities.length === 0 ? (
-        <div className="card" style={{ padding: 20, color: 'var(--sub)' }}>No community groups yet — create one above.</div>
+        <div className="card" style={{ padding: 20, color: 'var(--sub)' }}>No ILC groups yet — create one above.</div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
           {communities.map((c) => (
@@ -126,3 +154,5 @@ export default function ClientCommunitiesPage() {
     </div>
   )
 }
+
+const inputStyle = { padding: 8, border: '1px solid var(--line)', borderRadius: 8 }

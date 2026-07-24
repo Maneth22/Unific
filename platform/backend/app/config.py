@@ -84,6 +84,22 @@ class Settings(BaseSettings):
     gemini_input_cost_per_1k_tokens: float = 0.000075
     gemini_output_cost_per_1k_tokens: float = 0.0003
 
+    # Video conferencing (LiveKit) — backs the Meeting Room's live calls.
+    # video_provider defaults to "mock" like every other provider switch,
+    # so a bare checkout runs with zero config; set VIDEO_PROVIDER=livekit
+    # and fill in the three fields below (LiveKit's own standard env var
+    # names — their SDKs read these by default) to use a real deployment.
+    video_provider: str = "mock"
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+
+    # How long a passwordless meeting-invite link stays valid past the
+    # meeting's scheduled_at, and how long a LiveKit access token is valid
+    # once minted for a participant.
+    meeting_invite_ttl_hours: int = 6
+    meeting_token_ttl_minutes: int = 180
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

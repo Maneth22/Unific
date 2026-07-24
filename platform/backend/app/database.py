@@ -46,7 +46,7 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
-SCHEMAS = ("core", "accounts", "profiles", "meeting_room")
+SCHEMAS = ("core", "accounts", "profiles", "meeting_room", "tasking")
 
 engine = create_async_engine(
     settings.database_url,

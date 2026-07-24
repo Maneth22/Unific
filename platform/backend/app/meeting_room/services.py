@@ -10,21 +10,26 @@ reads clear English with tone insights.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.core.models.archive import ArchiveItemStatus, ArchiveShelf
 from app.core.models.audit import ActorType
-from app.core.models.common import RoomName, utcnow
-from app.core.providers.base import CommsAgent, ProviderError, ReplyGenerator, WhatsAppProvider
+from app.core.models.common import RoomName, utcnow, uuid_str
+from app.core.providers.base import CommsAgent, ProviderError, ReplyGenerator, VideoProvider, WhatsAppProvider
 from app.core.providers.stub_reply_generator import FALLBACK_REPLY
 from app.core.services import archive_service, audit_service, calendar_service, gate_service, spend_service
 from app.meeting_room.models import (
     Conversation,
     ConversationStatus,
     Meeting,
+    MeetingInvite,
+    MeetingParticipant,
     Message,
     MessageDirection,
     MeetingStatus,
@@ -33,7 +38,7 @@ from app.meeting_room.models import (
     SessionReport,
     WhatsAppLink,
 )
-from app.profiles.models import Identity, Permission
+from app.profiles.models import ClientOrgProfile, Identity, Permission
 
 logger = logging.getLogger(__name__)
 
@@ -542,24 +547,94 @@ async def get_conversation_with_messages(db: AsyncSession, conversation_id: str)
 
 # --- Meetings ---
 
+_JOINABLE_STATUSES = (MeetingStatus.scheduled, MeetingStatus.live)
+
+
 async def schedule_meeting(
-    db: AsyncSession, *, host_identity_id: str, scheduled_at, translate_live: bool, staff_id: str, notes: str = ""
+    db: AsyncSession,
+    *,
+    host_identity_id: str,
+    scheduled_at: datetime,
+    translate_live: bool,
+    staff_id: str,
+    notes: str = "",
+    participant_identity_ids: list[str] | None = None,
+    staff_participant_ids: list[str] | None = None,
+    meeting_kind: str = "community",
+    video_provider: VideoProvider,
 ) -> Meeting:
+    """Creates the meeting row, its LiveKit room, and a MeetingParticipant
+    (+ MeetingInvite, for identity-side participants) for the host, the
+    scheduling staff member, and everyone else listed. A room-creation
+    failure aborts scheduling entirely — unlike the comms pipeline's
+    degrade-gracefully philosophy, a meeting with no room is useless.
+
+    `meeting_kind="client_org"` is the admin "meet with a client" picker —
+    every identity participant must be a client-org root (have a
+    `ClientOrgProfile`), never an ILC/community identity. `"staff"` and
+    `"community"` (the default — the client's own meetings with their
+    community, unaffected by this restriction) skip the check."""
+    if meeting_kind == "client_org":
+        all_identity_ids = {host_identity_id, *(participant_identity_ids or [])} - {None}
+        if all_identity_ids:
+            result = await db.execute(
+                select(ClientOrgProfile.identity_id).where(ClientOrgProfile.identity_id.in_(all_identity_ids))
+            )
+            org_identity_ids = {row[0] for row in result.all()}
+            if org_identity_ids != all_identity_ids:
+                raise MeetingRoomError(
+                    "A client meeting can only include client organizations, never an ILC/community identity"
+                )
+
+    if scheduled_at.tzinfo is not None:
+        # Every datetime column in this app is naive UTC (see
+        # `core.models.common.utcnow`) — a request body's ISO-8601 string
+        # (e.g. from `Date.toISOString()`) parses to a tz-aware datetime,
+        # so it has to be normalized here at the service boundary before
+        # it ever reaches asyncpg, which rejects aware values for a
+        # TIMESTAMP WITHOUT TIME ZONE column.
+        scheduled_at = scheduled_at.astimezone(timezone.utc).replace(tzinfo=None)
+    meeting_id = uuid_str()
+    room_name = f"meeting-{meeting_id}"
+    try:
+        await video_provider.create_room(room_name)
+    except ProviderError as exc:
+        raise MeetingRoomError(f"Could not create the video conferencing room: {exc}") from exc
+
     meeting = Meeting(
+        id=meeting_id,
         host_identity_id=host_identity_id,
         scheduled_at=scheduled_at,
         translate_live=translate_live,
         notes=notes,
         created_by=staff_id,
+        room_name=room_name,
     )
     db.add(meeting)
+    await db.flush()
+
+    # The scheduling staff member is always a participant; the host
+    # identity is always a participant too (both dedup via set()).
+    for sid in {staff_id, *(staff_participant_ids or [])}:
+        db.add(MeetingParticipant(meeting_id=meeting.id, staff_user_id=sid))
+
+    invite_expires_at = scheduled_at + timedelta(hours=settings.meeting_invite_ttl_hours)
+    # host_identity_id is None for a "staff" meeting_kind (no identity-tree
+    # node to host it) — only real identity ids become identity-side
+    # participants/invites; the host is still a participant via the
+    # staff_participant_ids loop above in that case.
+    for identity_id in {host_identity_id, *(participant_identity_ids or [])} - {None}:
+        participant = MeetingParticipant(meeting_id=meeting.id, identity_id=identity_id)
+        db.add(participant)
+        await db.flush()
+        db.add(MeetingInvite(meeting_id=meeting.id, participant_id=participant.id, expires_at=invite_expires_at))
     await db.flush()
 
     await calendar_service.submit_timing(
         db,
         room=RoomName.meeting_room,
         kind="meeting",
-        title=f"Meeting — {host_identity_id}",
+        title=f"Meeting — {host_identity_id}" if host_identity_id else "Staff meeting",
         due_at=scheduled_at,
         related_entity_type="meeting",
         related_entity_id=meeting.id,
@@ -581,3 +656,230 @@ async def schedule_meeting(
 async def list_meetings(db: AsyncSession) -> list[Meeting]:
     result = await db.execute(select(Meeting).order_by(Meeting.scheduled_at))
     return list(result.scalars().all())
+
+
+async def get_meeting_with_participants(db: AsyncSession, meeting_id: str) -> Meeting | None:
+    result = await db.execute(
+        select(Meeting).options(selectinload(Meeting.participants)).where(Meeting.id == meeting_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_invites_for_meeting(db: AsyncSession, meeting_id: str) -> list[MeetingInvite]:
+    result = await db.execute(select(MeetingInvite).where(MeetingInvite.meeting_id == meeting_id))
+    return list(result.scalars().all())
+
+
+async def list_client_meetings(db: AsyncSession, identity_ids: list[str]) -> list[Meeting]:
+    """Meetings where any of the caller's own-or-descendant identities is
+    a participant — the client-dashboard scope boundary, same shape as
+    every other client list query in this app."""
+    result = await db.execute(
+        select(Meeting)
+        .join(MeetingParticipant, MeetingParticipant.meeting_id == Meeting.id)
+        .where(MeetingParticipant.identity_id.in_(identity_ids))
+        .order_by(Meeting.scheduled_at.desc())
+        .distinct()
+    )
+    return list(result.scalars().all())
+
+
+async def get_invite_by_token(db: AsyncSession, token: str) -> MeetingInvite | None:
+    result = await db.execute(select(MeetingInvite).where(MeetingInvite.token == token))
+    invite = result.scalar_one_or_none()
+    if invite is None or not invite.is_active or invite.revoked_at is not None:
+        return None
+    if invite.expires_at < utcnow():
+        return None
+    return invite
+
+
+async def get_public_join_info(db: AsyncSession, token: str) -> tuple[Meeting, MeetingParticipant, Identity | None] | None:
+    invite = await get_invite_by_token(db, token)
+    if invite is None:
+        return None
+    participant = await db.get(MeetingParticipant, invite.participant_id)
+    meeting = await db.get(Meeting, invite.meeting_id)
+    if participant is None or meeting is None:
+        return None
+    identity = await db.get(Identity, participant.identity_id) if participant.identity_id else None
+    return meeting, participant, identity
+
+
+async def _mark_joined(
+    db: AsyncSession, *, meeting: Meeting, participant: MeetingParticipant, actor_type: ActorType, actor_id: str | None
+) -> None:
+    now = utcnow()
+    participant.joined_at = now
+    if meeting.status == MeetingStatus.scheduled:
+        meeting.status = MeetingStatus.live
+        meeting.started_at = now
+    await audit_service.record(
+        db,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        action="meeting_room.meeting.join",
+        room=RoomName.meeting_room,
+        entity_type="meeting",
+        entity_id=meeting.id,
+    )
+    await db.flush()
+
+
+def _assert_joinable(meeting: Meeting) -> None:
+    if meeting.status not in _JOINABLE_STATUSES:
+        raise MeetingRoomError(f"This meeting is {meeting.status.value} and can no longer be joined")
+
+
+async def mint_staff_join(
+    db: AsyncSession, *, meeting_id: str, staff_id: str, staff_name: str, video_provider: VideoProvider
+) -> tuple[Meeting, str]:
+    """Staff can join any meeting — mirrors the rest of this app's model
+    where every active staff account has full access (see
+    `app.core.security.dependencies.require_admin`); a staff member not
+    originally invited is simply added as a participant on first join."""
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        raise MeetingRoomError("Meeting not found")
+    _assert_joinable(meeting)
+
+    result = await db.execute(
+        select(MeetingParticipant).where(
+            MeetingParticipant.meeting_id == meeting_id, MeetingParticipant.staff_user_id == staff_id
+        )
+    )
+    participant = result.scalar_one_or_none()
+    if participant is None:
+        participant = MeetingParticipant(meeting_id=meeting_id, staff_user_id=staff_id)
+        db.add(participant)
+        await db.flush()
+
+    token = await video_provider.generate_access_token(
+        room_name=meeting.room_name,
+        participant_identity=f"staff:{staff_id}",
+        participant_name=staff_name,
+        ttl_seconds=settings.meeting_token_ttl_minutes * 60,
+    )
+    await _mark_joined(db, meeting=meeting, participant=participant, actor_type=ActorType.staff, actor_id=staff_id)
+    return meeting, token
+
+
+async def mint_client_join(
+    db: AsyncSession, *, meeting_id: str, identity_id: str, video_provider: VideoProvider
+) -> tuple[Meeting, str]:
+    """`identity_id` must already be scope-checked by the caller (router)
+    against the client's own subtree — this only checks it's actually a
+    participant on this specific meeting."""
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        raise MeetingRoomError("Meeting not found")
+    _assert_joinable(meeting)
+
+    identity = await db.get(Identity, identity_id)
+    if identity is None:
+        raise MeetingRoomError("Identity not found")
+
+    result = await db.execute(
+        select(MeetingParticipant).where(
+            MeetingParticipant.meeting_id == meeting_id, MeetingParticipant.identity_id == identity_id
+        )
+    )
+    participant = result.scalar_one_or_none()
+    if participant is None:
+        raise MeetingRoomError("This identity is not a participant on this meeting")
+
+    token = await video_provider.generate_access_token(
+        room_name=meeting.room_name,
+        participant_identity=f"identity:{identity_id}",
+        participant_name=identity.name,
+        ttl_seconds=settings.meeting_token_ttl_minutes * 60,
+    )
+    await _mark_joined(db, meeting=meeting, participant=participant, actor_type=ActorType.client, actor_id=identity_id)
+    return meeting, token
+
+
+async def mint_public_join(db: AsyncSession, *, token: str, video_provider: VideoProvider) -> tuple[Meeting, str]:
+    """The passwordless join path for a WhatsApp-only community member (or
+    anyone else holding a valid, unexpired, unrevoked invite link) — the
+    token itself is the join credential, no login required."""
+    info = await get_public_join_info(db, token)
+    if info is None:
+        raise MeetingRoomError("This meeting link is invalid or has expired")
+    meeting, participant, identity = info
+    _assert_joinable(meeting)
+
+    participant_name = identity.name if identity is not None else "Guest"
+    token_jwt = await video_provider.generate_access_token(
+        room_name=meeting.room_name,
+        participant_identity=f"identity:{participant.identity_id}",
+        participant_name=participant_name,
+        ttl_seconds=settings.meeting_token_ttl_minutes * 60,
+    )
+
+    invite = await get_invite_by_token(db, token)
+    if invite is not None:
+        invite.used_at = utcnow()
+    await _mark_joined(db, meeting=meeting, participant=participant, actor_type=ActorType.system, actor_id=None)
+    return meeting, token_jwt
+
+
+async def end_meeting(db: AsyncSession, *, meeting_id: str, staff_id: str, video_provider: VideoProvider) -> Meeting:
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        raise MeetingRoomError("Meeting not found")
+    if meeting.status == MeetingStatus.cancelled:
+        raise MeetingRoomError("This meeting was cancelled")
+
+    try:
+        await video_provider.end_room(meeting.room_name)
+    except ProviderError as exc:
+        # Best-effort: our own record of "this meeting is over" shouldn't
+        # hinge on the provider's disconnect call succeeding.
+        logger.warning("LiveKit room end failed (marking meeting completed regardless): %s", exc)
+
+    meeting.status = MeetingStatus.completed
+    meeting.ended_at = utcnow()
+    await audit_service.record(
+        db,
+        actor_type=ActorType.staff,
+        actor_id=staff_id,
+        action="meeting_room.meeting.end",
+        room=RoomName.meeting_room,
+        entity_type="meeting",
+        entity_id=meeting.id,
+    )
+    await db.flush()
+    return meeting
+
+
+async def delete_meeting(db: AsyncSession, *, meeting_id: str, staff_id: str, video_provider: VideoProvider) -> None:
+    """Removes a meeting entirely — including force-closing its LiveKit
+    room first, so a scheduled-but-abandoned or forgotten-to-end meeting
+    doesn't just sit there consuming a room indefinitely. Safe to hard-
+    delete (unlike e.g. GroupInvite, which this app deliberately never
+    hard-deletes): `AuditLog.entity_id` is a plain string, not a foreign
+    key, so the audit trail below survives this row's removal regardless
+    of MeetingParticipant/MeetingInvite cascading away with it."""
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        raise MeetingRoomError("Meeting not found")
+
+    try:
+        await video_provider.end_room(meeting.room_name)
+    except ProviderError as exc:
+        # Best-effort, same as end_meeting: deletion must not hinge on the
+        # provider call succeeding, but we still want to have tried.
+        logger.warning("LiveKit room deletion failed (deleting the meeting record regardless): %s", exc)
+
+    await audit_service.record(
+        db,
+        actor_type=ActorType.staff,
+        actor_id=staff_id,
+        action="meeting_room.meeting.delete",
+        room=RoomName.meeting_room,
+        entity_type="meeting",
+        entity_id=meeting.id,
+        before={"room_name": meeting.room_name, "status": meeting.status.value, "scheduled_at": meeting.scheduled_at.isoformat()},
+    )
+    await db.delete(meeting)
+    await db.flush()

@@ -6,10 +6,11 @@ provider/LLM call.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
+from typing import Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.models import (
@@ -145,6 +146,33 @@ async def financial_summary(db: AsyncSession) -> dict:
         "by_category": by_category,
         "room_summaries": room_summaries,
     }
+
+
+async def financial_record_timeseries(
+    db: AsyncSession, *, since: date | None = None, bucket: Literal["day", "week"] = "day"
+) -> list[dict]:
+    """Manual expenses (hosting, tools, subscriptions, ...) over time,
+    grouped by category — the non-LLM half of the admin Accounts-Room
+    landing dashboard's "system costs over a timeline, per service"
+    chart (`core.llm_usage_service.get_usage_timeseries` is the other
+    half, for LLM token spend specifically)."""
+    period = func.date_trunc(bucket, FinancialRecord.incurred_at).label("period")
+    stmt = (
+        select(
+            period,
+            FinancialRecord.category,
+            func.coalesce(func.sum(FinancialRecord.amount), 0).label("total_amount"),
+        )
+        .group_by(period, FinancialRecord.category)
+        .order_by(period)
+    )
+    if since is not None:
+        stmt = stmt.where(FinancialRecord.incurred_at >= since)
+    result = await db.execute(stmt)
+    return [
+        {"period": row.period, "category": row.category.value, "total_amount": row.total_amount}
+        for row in result.all()
+    ]
 
 
 # --- API Monitor ---

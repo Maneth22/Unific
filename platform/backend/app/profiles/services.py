@@ -12,9 +12,10 @@ allows.
 from __future__ import annotations
 
 import secrets
+from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.models.audit import ActorType
@@ -24,11 +25,14 @@ from app.core.models.ledger import LedgerEntry, LedgerEntryType
 from app.core.security.password import hash_password
 from app.core.services import audit_service, scope_service
 from app.profiles.models import (
+    ClientOrgProfile,
     ConsentContext,
     ConsentRecord,
     GroupInvite,
     Identity,
     IdentityType,
+    IlcGroupProfile,
+    IlcMemberRoster,
     MemberProfile,
     Permission,
     PermissionScope,
@@ -190,6 +194,111 @@ async def create_identity(
         after={"name": name, "id_type": id_type.value, "parent_id": parent_id},
     )
     return identity
+
+
+async def _generate_group_code(db: AsyncSession, prefix: str) -> str:
+    """Atomically increments the shared per-prefix sequence (a single
+    UPSERT, not read-then-write) and returns e.g. "CLI-000042" — race-
+    safe under concurrent creates. First use of a prefix seeds the row."""
+    result = await db.execute(
+        text(
+            "INSERT INTO profiles.group_code_sequence (prefix, next_value) VALUES (:prefix, 1) "
+            "ON CONFLICT (prefix) DO UPDATE SET next_value = profiles.group_code_sequence.next_value + 1 "
+            "RETURNING next_value"
+        ),
+        {"prefix": prefix},
+    )
+    next_value = result.scalar_one()
+    return f"{prefix}-{next_value:06d}"
+
+
+async def create_client_org_identity(
+    db: AsyncSession,
+    *,
+    name: str,
+    entity_type: str = "",
+    role_description: str = "",
+    abn_acnc_number: str | None = None,
+    actor_type: ActorType,
+    actor_id: str | None,
+) -> Identity:
+    """Creates a client organization's root identity + its
+    `ClientOrgProfile` in one call — mirrors how `create_identity` already
+    creates `Permission`+`ProfileAccount` alongside `Identity`, so a
+    client-org identity is never left without its profile row."""
+    identity = await create_identity(
+        db, name=name, id_type=IdentityType.group, parent_id=None, actor_type=actor_type, actor_id=actor_id
+    )
+    group_code = await _generate_group_code(db, "CLI")
+    db.add(
+        ClientOrgProfile(
+            identity_id=identity.id,
+            group_code=group_code,
+            entity_type=entity_type,
+            role_description=role_description,
+            abn_acnc_number=abn_acnc_number,
+        )
+    )
+    await db.flush()
+    return identity
+
+
+async def create_ilc_group_identity(
+    db: AsyncSession,
+    *,
+    name: str,
+    parent_id: str,
+    actor_type: ActorType,
+    actor_id: str | None,
+    name_hindi: str = "",
+    registration_number: str = "",
+    date_of_registration: date | None = None,
+    application_signed: bool = False,
+    registered_office: str = "",
+    area_of_operation: str = "",
+    governing_act: str = "",
+    registering_authority: str = "",
+    objective: str = "",
+    cooperative_type: str = "",
+    bank_account: str = "",
+) -> Identity:
+    """Creates an ILC community group under a client org + its
+    `IlcGroupProfile` in one call, same pattern as
+    `create_client_org_identity`."""
+    identity = await create_identity(
+        db, name=name, id_type=IdentityType.group, parent_id=parent_id, actor_type=actor_type, actor_id=actor_id
+    )
+    group_code = await _generate_group_code(db, "ILC")
+    db.add(
+        IlcGroupProfile(
+            identity_id=identity.id,
+            group_code=group_code,
+            name_hindi=name_hindi,
+            registration_number=registration_number,
+            date_of_registration=date_of_registration,
+            application_signed=application_signed,
+            registered_office=registered_office,
+            area_of_operation=area_of_operation,
+            governing_act=governing_act,
+            registering_authority=registering_authority,
+            objective=objective,
+            cooperative_type=cooperative_type,
+            bank_account=bank_account,
+        )
+    )
+    await db.flush()
+    return identity
+
+
+async def list_client_org_identities(db: AsyncSession) -> list[Identity]:
+    """Every identity with a `ClientOrgProfile` — i.e. every client org
+    root, and only that — for the admin's client-vs-staff picker and the
+    "meet with a client" meeting-scheduling restriction (never an ILC/
+    community identity)."""
+    result = await db.execute(
+        select(Identity).join(ClientOrgProfile, ClientOrgProfile.identity_id == Identity.id).order_by(Identity.name)
+    )
+    return list(result.scalars().all())
 
 
 async def list_tree(db: AsyncSession) -> list[Identity]:
@@ -471,15 +580,71 @@ async def get_invite_by_token(db: AsyncSession, token: str) -> GroupInvite | Non
     return invite
 
 
+async def add_roster_numbers(
+    db: AsyncSession, *, group_identity_id: str, numbers: list[str], actor_client_id: str | None
+) -> list[IlcMemberRoster]:
+    """Client-assigned, pre-issued ILC numbers a member can register with
+    — see `IlcMemberRoster`'s docstring. Numbers already on the roster are
+    skipped (not an error) so a client can re-paste a bigger list without
+    it failing on overlap."""
+    group = await db.get(Identity, group_identity_id)
+    if group is None or group.id_type != IdentityType.group:
+        raise ProfilesError("Group not found")
+
+    existing_result = await db.execute(
+        select(IlcMemberRoster.ilc_registration_number).where(IlcMemberRoster.group_identity_id == group_identity_id)
+    )
+    existing_numbers = {n for (n,) in existing_result.all()}
+
+    entries = []
+    for number in numbers:
+        number = number.strip()
+        if not number or number in existing_numbers:
+            continue
+        entry = IlcMemberRoster(group_identity_id=group_identity_id, ilc_registration_number=number, created_by_client_id=actor_client_id)
+        db.add(entry)
+        entries.append(entry)
+        existing_numbers.add(number)
+    await db.flush()
+    return entries
+
+
+async def list_roster(db: AsyncSession, group_identity_id: str) -> list[IlcMemberRoster]:
+    result = await db.execute(
+        select(IlcMemberRoster)
+        .where(IlcMemberRoster.group_identity_id == group_identity_id)
+        .order_by(IlcMemberRoster.created_at)
+    )
+    return list(result.scalars().all())
+
+
 async def create_member_profile(
     db: AsyncSession,
     *,
     identity_id: str,
+    group_identity_id: str,
+    ilc_registration_number: str,
     email: str,
     phone_number: str,
     extra_info: dict,
     source_invite_id: str | None,
 ) -> MemberProfile:
+    """Verifies `ilc_registration_number` against the client's pre-issued
+    roster for this group before creating the member — an unrecognized
+    number is rejected outright, an already-claimed one is rejected as a
+    duplicate (see `IlcMemberRoster`)."""
+    roster_result = await db.execute(
+        select(IlcMemberRoster).where(
+            IlcMemberRoster.group_identity_id == group_identity_id,
+            IlcMemberRoster.ilc_registration_number == ilc_registration_number,
+        )
+    )
+    roster_entry = roster_result.scalar_one_or_none()
+    if roster_entry is None:
+        raise ProfilesError("This registration number is not recognized for this group")
+    if roster_entry.is_claimed:
+        raise ProfilesError("This registration number has already been used")
+
     profile = MemberProfile(
         identity_id=identity_id,
         email=email,
@@ -487,8 +652,14 @@ async def create_member_profile(
         extra_info=extra_info,
         registered_via="public_form",
         source_invite_id=source_invite_id,
+        ilc_roster_entry_id=roster_entry.id,
     )
     db.add(profile)
+
+    roster_entry.is_claimed = True
+    roster_entry.claimed_by_identity_id = identity_id
+    roster_entry.claimed_at = utcnow()
+
     await db.flush()
     return profile
 

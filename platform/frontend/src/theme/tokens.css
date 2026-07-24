@@ -92,7 +92,12 @@ input, select, textarea {
   font-size: 13px;
   font-weight: 600;
   color: var(--ink);
+  transition: filter 0.12s ease, transform 0.06s ease;
 }
+
+.btn:hover:not(:disabled) { filter: brightness(0.97); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: 0.6; cursor: default; }
 
 .btn-primary {
   background: var(--token);
@@ -100,11 +105,29 @@ input, select, textarea {
   color: white;
 }
 
+.btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+
 .btn-danger {
   background: var(--red);
   border-color: var(--red);
   color: white;
 }
+
+.btn-danger:hover:not(:disabled) { filter: brightness(1.08); }
+
+.card-clickable {
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.card-clickable:hover { background: var(--neutral-bg); border-color: var(--slate); }
+
+@keyframes badge-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.badge-pulse { animation: badge-pulse 1.8s ease-in-out infinite; }
 
 .badge {
   display: inline-block;

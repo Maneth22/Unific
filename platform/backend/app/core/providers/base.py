@@ -1,5 +1,6 @@
 """Provider interfaces for external connectors — WhatsApp, translation,
-and reply generation. Defined here in `core`, not `meeting_room`, because
+reply generation, and video conferencing. Defined here in `core`, not
+`meeting_room`, because
 Tasks 6-7 (Resources, Assets) will need identically-shaped external
 connectors later; this is the "define the room contract once" piece the
 Flags & Issues doc calls for.
@@ -177,3 +178,24 @@ class CommsAgent(ABC):
         """Full transcript -> a community member's ongoing profile summary
         for the client dashboard's community roster — framed as "who this
         person is and what they need," not a single session's recap."""
+
+
+class VideoProvider(ABC):
+    """Video-conferencing room/token provider for the Meeting Room's live
+    calls. `create_room`/`end_room` manage the room's lifecycle server-side;
+    `generate_access_token` mints a short-lived, per-participant join
+    credential — no participant ever sees the provider's API key/secret."""
+
+    @abstractmethod
+    async def create_room(self, room_name: str) -> None:
+        """Idempotent: safe to call even if the room already exists."""
+
+    @abstractmethod
+    async def generate_access_token(
+        self, *, room_name: str, participant_identity: str, participant_name: str, ttl_seconds: int
+    ) -> str:
+        """Returns a signed token a client can use to join `room_name`."""
+
+    @abstractmethod
+    async def end_room(self, room_name: str) -> None:
+        """Force-disconnects every participant and closes the room."""

@@ -191,3 +191,31 @@ class AiUsageSummaryRow(BaseModel):
     call_count: int
     total_tokens: int
     total_cost: Decimal
+
+
+class UsageTimeseriesRow(BaseModel):
+    """One bucketed row of the admin cost-timeline chart — `period` is the
+    bucket start (day/week), `group_value` the service/model/action/room
+    it's grouped by."""
+
+    period: datetime
+    group_value: str
+    total_tokens: int
+    total_cost: Decimal
+
+
+class UsageByClientNeedRow(BaseModel):
+    """The LLM-tokens drill-down: one client, one "need" (action)."""
+
+    identity_id: str | None
+    identity_name: str | None
+    action: str
+    call_count: int
+    total_tokens: int
+    total_cost: Decimal
+
+
+class FinancialTimeseriesRow(BaseModel):
+    period: datetime
+    category: str
+    total_amount: Decimal

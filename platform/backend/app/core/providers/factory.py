@@ -7,8 +7,9 @@ from __future__ import annotations
 from functools import lru_cache
 
 from app.config import settings
-from app.core.providers.base import ReplyGenerator, TranslationProvider, WhatsAppProvider
+from app.core.providers.base import ReplyGenerator, TranslationProvider, VideoProvider, WhatsAppProvider
 from app.core.providers.mock_translation import MockTranslationProvider
+from app.core.providers.mock_video_provider import MockVideoProvider
 from app.core.providers.mock_whatsapp import MockWhatsAppProvider
 from app.core.providers.stub_reply_generator import StubReplyGenerator
 
@@ -51,3 +52,12 @@ def get_comms_agent():
     from app.core.providers.mock_comms_agent import MockCommsAgent
 
     return MockCommsAgent()
+
+
+@lru_cache
+def get_video_provider() -> VideoProvider:
+    if settings.video_provider == "livekit":
+        from app.core.providers.livekit_video_provider import LiveKitVideoProvider
+
+        return LiveKitVideoProvider()
+    return MockVideoProvider()

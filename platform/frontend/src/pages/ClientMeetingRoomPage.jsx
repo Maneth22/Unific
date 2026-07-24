@@ -1,6 +1,9 @@
 import React, { useEffect, useState } from 'react'
-import { generateReport, getMyConversation, initiateRoom, listMyConversations, listReports, sendMyReply } from '../api/clientMeetingRoom'
+import {
+  generateReport, getMyConversation, initiateRoom, joinMyMeeting, listMyConversations, listMyMeetings, listReports, sendMyReply,
+} from '../api/clientMeetingRoom'
 import { listMyIdentities } from '../api/clientProfiles'
+import VideoCallRoom from '../components/VideoCallRoom'
 
 const LANGUAGES = [
   { value: 'auto', label: 'Auto — match their language' },
@@ -11,7 +14,129 @@ const LANGUAGES = [
 ]
 const TONES = ['friendly', 'formal', 'informal']
 
+const TABS = [
+  { key: 'chat', label: 'Chat' },
+  { key: 'meetings', label: 'Meetings' },
+]
+
 export default function ClientMeetingRoomPage() {
+  const [tab, setTab] = useState('chat')
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 20 }}>
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            style={{
+              border: 'none',
+              background: 'none',
+              padding: '10px 14px',
+              fontSize: 13,
+              fontWeight: 700,
+              cursor: 'pointer',
+              color: tab === t.key ? 'var(--token)' : 'var(--sub)',
+              borderBottom: tab === t.key ? '2px solid var(--token)' : '2px solid transparent',
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {tab === 'chat' ? <ChatTab /> : <MeetingsTab />}
+    </div>
+  )
+}
+
+const MEETING_STATUS_BADGE = {
+  scheduled: 'badge-pending',
+  live: 'badge-agent',
+  completed: 'badge-room',
+  cancelled: 'badge-alert',
+}
+
+const meetingRtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' })
+
+function meetingRelativeTime(iso) {
+  const diffMs = new Date(iso) - Date.now()
+  const abs = Math.abs(diffMs)
+  const minute = 60000, hour = 3600000, day = 86400000
+  if (abs < hour) return meetingRtf.format(Math.round(diffMs / minute), 'minute')
+  if (abs < day) return meetingRtf.format(Math.round(diffMs / hour), 'hour')
+  return meetingRtf.format(Math.round(diffMs / day), 'day')
+}
+
+function MeetingsTab() {
+  const [meetings, setMeetings] = useState([])
+  const [call, setCall] = useState(null)
+  const [error, setError] = useState('')
+  const [joiningId, setJoiningId] = useState('')
+
+  async function refresh() {
+    setMeetings(await listMyMeetings())
+  }
+
+  useEffect(() => { refresh() }, [])
+
+  // So a meeting flips to "live" (or someone else's join shows up) without
+  // the client having to manually refresh the page.
+  useEffect(() => {
+    if (call) return
+    const id = setInterval(refresh, 5000)
+    return () => clearInterval(id)
+  }, [call])
+
+  async function handleJoin(meetingId) {
+    setError('')
+    setJoiningId(meetingId)
+    try {
+      const join = await joinMyMeeting(meetingId)
+      setCall(join)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not join meeting')
+    } finally {
+      setJoiningId('')
+    }
+  }
+
+  if (call) {
+    return (
+      <div>
+        <button className="btn" style={{ marginBottom: 12 }} onClick={() => setCall(null)}>&larr; Leave call</button>
+        <VideoCallRoom serverUrl={call.livekit_url} token={call.token} onDisconnected={() => setCall(null)} />
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      {error && <div className="badge badge-alert" style={{ display: 'block', marginBottom: 12, padding: '8px 12px' }}>{error}</div>}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {meetings.map((m) => (
+          <div key={m.id} className="card" style={{ padding: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <span className={`badge ${MEETING_STATUS_BADGE[m.status] || 'badge-room'} ${m.status === 'live' ? 'badge-pulse' : ''}`}>
+                {m.status}
+              </span>{' '}
+              <span style={{ fontSize: 12, color: 'var(--sub)' }}>{new Date(m.scheduled_at).toLocaleString()}</span>
+              <span style={{ fontSize: 11, color: 'var(--sub)', marginLeft: 6 }}>({meetingRelativeTime(m.scheduled_at)})</span>
+              {m.notes && <div style={{ fontSize: 12, color: 'var(--sub)', marginTop: 4 }}>{m.notes}</div>}
+            </div>
+            {(m.status === 'scheduled' || m.status === 'live') && (
+              <button className="btn btn-primary" disabled={joiningId === m.id} onClick={() => handleJoin(m.id)}>
+                {joiningId === m.id ? 'Joining…' : 'Join'}
+              </button>
+            )}
+          </div>
+        ))}
+        {meetings.length === 0 && <div className="card" style={{ padding: 20, color: 'var(--sub)' }}>No meetings scheduled.</div>}
+      </div>
+    </div>
+  )
+}
+
+function ChatTab() {
   const [conversations, setConversations] = useState([])
   const [identities, setIdentities] = useState([])
   const [selectedId, setSelectedId] = useState(null)

@@ -26,3 +26,10 @@ export const createArchiveItem = (payload) => apiClient.post('/accounts/archive'
 
 // --- Administrative agent ---
 export const getAdministrativeSummary = () => apiClient.get('/accounts/administrative-summary').then((r) => r.data)
+
+// --- Cost dashboard (timeline + drill-down) ---
+export const getCostTimeseries = (bucket = 'day', groupBy = 'model') =>
+  apiClient.get('/accounts/cost-timeseries', { params: { bucket, group_by: groupBy } }).then((r) => r.data)
+export const getUsageByClientNeed = () => apiClient.get('/accounts/ai-usage/by-client-need').then((r) => r.data)
+export const getFinancialTimeseries = (bucket = 'day') =>
+  apiClient.get('/accounts/financial-timeseries', { params: { bucket } }).then((r) => r.data)

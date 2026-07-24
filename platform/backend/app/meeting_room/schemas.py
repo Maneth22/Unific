@@ -80,21 +80,69 @@ class ReportOut(BaseModel):
 
 
 class MeetingCreate(BaseModel):
-    host_identity_id: str
+    # None for meeting_kind="staff" — a staff-only meeting has no
+    # identity-tree node to host it.
+    host_identity_id: str | None = None
     scheduled_at: datetime
     translate_live: bool = True
     notes: str = ""
+    participant_identity_ids: list[str] = []
+    staff_participant_ids: list[str] = []
+    # "staff" | "client_org" | "community" — which picker was used; only
+    # "client_org" is restricted (client-org-root identities only, never
+    # an ILC/community identity). See services.schedule_meeting.
+    meeting_kind: str = "community"
 
 
 class MeetingOut(BaseModel):
     id: str
-    host_identity_id: str
+    host_identity_id: str | None
     scheduled_at: datetime
     translate_live: bool
     status: str
     notes: str
+    room_name: str
+    started_at: datetime | None
+    ended_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+class MeetingParticipantOut(BaseModel):
+    id: str
+    identity_id: str | None
+    staff_user_id: str | None
+    joined_at: datetime | None
+    left_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class MeetingDetailOut(MeetingOut):
+    participants: list[MeetingParticipantOut]
+    # Staff-only view: one shareable join link per identity-side
+    # participant, keyed by MeetingParticipant.id. Never populated on the
+    # client/public-facing responses.
+    invite_urls: dict[str, str] = {}
+
+
+class ClientJoinRequest(BaseModel):
+    # Defaults to the client's own root identity if omitted — set this to
+    # join as a specific sub-group/member within the client's own scope.
+    identity_id: str | None = None
+
+
+class JoinResponse(BaseModel):
+    livekit_url: str
+    token: str
+    room_name: str
+
+
+class PublicMeetingInfoOut(BaseModel):
+    meeting_id: str
+    scheduled_at: datetime
+    status: str
+    participant_name: str
 
 
 class ConfigBoardOut(BaseModel):

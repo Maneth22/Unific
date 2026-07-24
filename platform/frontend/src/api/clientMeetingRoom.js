@@ -11,3 +11,8 @@ export const generateReport = (conversationId, reportType) =>
   apiClient.post(`/meeting-room/client/conversations/${conversationId}/reports`, { report_type: reportType }).then((r) => r.data)
 export const listReports = (conversationId) =>
   apiClient.get(`/meeting-room/client/conversations/${conversationId}/reports`).then((r) => r.data)
+
+export const listMyMeetings = () => apiClient.get('/meeting-room/client/meetings').then((r) => r.data)
+export const getMyMeeting = (id) => apiClient.get(`/meeting-room/client/meetings/${id}`).then((r) => r.data)
+export const joinMyMeeting = (id, identityId) =>
+  apiClient.post(`/meeting-room/client/meetings/${id}/join`, identityId ? { identity_id: identityId } : {}).then((r) => r.data)

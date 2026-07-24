@@ -10,11 +10,15 @@ from app.accounts.router import router as accounts_router
 from app.auth.router import router as staff_auth_router
 from app.config import settings
 from app.meeting_room.router import client_router as meeting_room_client_router
+from app.meeting_room.router import public_router as meeting_room_public_router
 from app.meeting_room.router import router as meeting_room_router
 from app.middleware import SecurityHeadersMiddleware
 from app.profiles.router import client_router as profiles_client_router
+from app.profiles.router import client_staff_router as profiles_client_staff_router
 from app.profiles.router import public_router as profiles_public_router
 from app.profiles.router import router as profiles_router
+from app.staff_directory.router import router as staff_directory_router
+from app.tasking.router import router as tasking_router
 
 app = FastAPI(
     title="UNIFIC Platform API",
@@ -35,9 +39,13 @@ app.include_router(staff_auth_router)
 app.include_router(accounts_router)
 app.include_router(profiles_router)
 app.include_router(profiles_client_router)
+app.include_router(profiles_client_staff_router)
 app.include_router(profiles_public_router)
 app.include_router(meeting_room_router)
 app.include_router(meeting_room_client_router)
+app.include_router(meeting_room_public_router)
+app.include_router(staff_directory_router)
+app.include_router(tasking_router)
 
 
 @app.get("/api/health")

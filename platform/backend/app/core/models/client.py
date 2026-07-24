@@ -17,6 +17,13 @@ from app.database import Base
 
 
 class ClientUser(Base):
+    """A full-access, org-scoped login — either the original org-owner
+    account (created via `approve_client_registration`) or a co-owner
+    provisioned later by a platform Admin (`is_owner=True` either way;
+    the flag is a display/audit label, not a privilege distinction —
+    every `ClientUser` row has identical access to its org). Distinct
+    from `ClientStaffUser` below, which is deliberately narrower."""
+
     __tablename__ = "client_user"
     __table_args__ = {"schema": "core"}
 
@@ -26,6 +33,38 @@ class ClientUser(Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     identity_id: Mapped[str] = mapped_column(
         ForeignKey("profiles.identity.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    is_owner: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ClientStaffUser(Base):
+    """A limited, org-scoped login a `ClientUser` (org owner/co-owner)
+    creates for their own employees. Mirrors `ClientUser`'s shape but is a
+    separate table, not a role flag on it — it needs its own JWT audience
+    (`"client_staff"`, alongside `"staff"`/`"client"`) so route-gating is a
+    type check (can this token even decode as `audience="client"`?), not a
+    role check baked into token claims. Full read/write on ILC groups,
+    members, and meetings under the org (reuses `require_identity_scope`
+    as-is — scope is purely tree-position, agnostic to owner-vs-staff);
+    blocked from money (accounts-overview, funding, transfer) and from
+    managing other client-staff/co-owner logins — see
+    `app.profiles.security.require_client_owner`."""
+
+    __tablename__ = "client_staff_user"
+    __table_args__ = {"schema": "core"}
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    identity_id: Mapped[str] = mapped_column(
+        ForeignKey("profiles.identity.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_by_client_id: Mapped[str | None] = mapped_column(
+        ForeignKey("core.client_user.id", ondelete="SET NULL"), nullable=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)

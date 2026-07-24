@@ -1,13 +1,13 @@
 """Auth dependencies for staff (master dashboard) routes. Client-scoped
 dependencies (`require_identity_scope`) live in `app.profiles.security`.
 
-There is no per-room grant model — every active staff account is a full
-Admin. `require_admin` is the single server-side gate every accounts/
-profiles/meeting-room staff route depends on (the UI showing/hiding a nav
-item is not access control, this dependency is); it used to be
-`require_room_access(room, minimum)` checking a `StaffRoomAccess` row, but
-that per-room grant table was removed when staff roles were collapsed to
-one Admin role.
+Two tiers: `StaffTier.admin` gets every existing admin route (clients,
+cost/API data, staff management, meeting scheduling); `StaffTier.staff` is
+deliberately narrow — their own tasks/updates/inbox only (`app.tasking`).
+`require_admin` gates the former, `require_any_staff` the latter/shared
+routes (e.g. `GET /auth/me`, joining a meeting one was invited to). This
+reverses the previous "every staff account is a full Admin" collapse by
+deliberate choice — see `app.core.models.staff.StaffUser`'s docstring.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.models.staff import StaffUser
+from app.core.models.staff import StaffTier, StaffUser
 from app.core.security.jwt import decode_access_token
 from app.database import get_db
 
@@ -42,10 +42,19 @@ async def get_current_staff_user(
     return staff_user
 
 
+async def require_any_staff(current_staff: StaffUser = Depends(get_current_staff_user)) -> StaffUser:
+    """Any active staff account, admin or not — for routes both tiers use
+    (a staff member's own profile, their own tasks/inbox, joining a
+    meeting they were invited to)."""
+    return current_staff
+
+
 async def require_admin(current_staff: StaffUser = Depends(get_current_staff_user)) -> StaffUser:
-    """Named wrapper around `get_current_staff_user` so router code reads
-    self-documenting (`Depends(require_admin)`) rather than depending on
-    the generic accessor directly. Any active staff account passes."""
+    """Only `StaffTier.admin` passes. Every accounts/profiles/meeting-
+    scheduling route in this app stays gated by this — regular staff never
+    see client data, cost/API dashboards, or another staff member's tasks."""
+    if current_staff.tier != StaffTier.admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_staff
 
 
