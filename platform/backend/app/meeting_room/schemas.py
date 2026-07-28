@@ -94,6 +94,18 @@ class MeetingCreate(BaseModel):
     meeting_kind: str = "community"
 
 
+class ClientMeetingCreate(BaseModel):
+    # The community/sub-group identity to host the meeting — must be within
+    # the calling client's own scope (checked server-side).
+    host_identity_id: str
+    scheduled_at: datetime
+    translate_live: bool = True
+    notes: str = ""
+    # Other identities (also within the client's own scope) to invite —
+    # e.g. additional community members alongside the host.
+    participant_identity_ids: list[str] = []
+
+
 class MeetingOut(BaseModel):
     id: str
     host_identity_id: str | None

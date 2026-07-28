@@ -556,7 +556,8 @@ async def schedule_meeting(
     host_identity_id: str,
     scheduled_at: datetime,
     translate_live: bool,
-    staff_id: str,
+    staff_id: str | None = None,
+    client_id: str | None = None,
     notes: str = "",
     participant_identity_ids: list[str] | None = None,
     staff_participant_ids: list[str] | None = None,
@@ -573,7 +574,15 @@ async def schedule_meeting(
     every identity participant must be a client-org root (have a
     `ClientOrgProfile`), never an ILC/community identity. `"staff"` and
     `"community"` (the default — the client's own meetings with their
-    community, unaffected by this restriction) skip the check."""
+    community, unaffected by this restriction) skip the check.
+
+    Exactly one of `staff_id` (an admin scheduling) or `client_id` (a
+    client scheduling a meeting for their own community, `meeting_kind=
+    "community"` only) is set — that caller becomes the audit/calendar
+    actor; `staff_id` alone still becomes `Meeting.created_by` and an
+    invited-staff participant, since that column/relation is staff-only."""
+    actor_type = ActorType.staff if staff_id else ActorType.client
+    actor_id = staff_id or client_id
     if meeting_kind == "client_org":
         all_identity_ids = {host_identity_id, *(participant_identity_ids or [])} - {None}
         if all_identity_ids:
@@ -613,9 +622,10 @@ async def schedule_meeting(
     db.add(meeting)
     await db.flush()
 
-    # The scheduling staff member is always a participant; the host
-    # identity is always a participant too (both dedup via set()).
-    for sid in {staff_id, *(staff_participant_ids or [])}:
+    # The scheduling staff member (if any — a client-scheduled meeting has
+    # none unless explicitly invited) is a participant; the host identity
+    # is always a participant too (both dedup via set()).
+    for sid in {staff_id, *(staff_participant_ids or [])} - {None}:
         db.add(MeetingParticipant(meeting_id=meeting.id, staff_user_id=sid))
 
     invite_expires_at = scheduled_at + timedelta(hours=settings.meeting_invite_ttl_hours)
@@ -638,13 +648,13 @@ async def schedule_meeting(
         due_at=scheduled_at,
         related_entity_type="meeting",
         related_entity_id=meeting.id,
-        actor_type=ActorType.staff,
-        actor_id=staff_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
     )
     await audit_service.record(
         db,
-        actor_type=ActorType.staff,
-        actor_id=staff_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
         action="meeting_room.meeting.schedule",
         room=RoomName.meeting_room,
         entity_type="meeting",
@@ -823,7 +833,17 @@ async def mint_public_join(db: AsyncSession, *, token: str, video_provider: Vide
     return meeting, token_jwt
 
 
-async def end_meeting(db: AsyncSession, *, meeting_id: str, staff_id: str, video_provider: VideoProvider) -> Meeting:
+async def end_meeting(
+    db: AsyncSession,
+    *,
+    meeting_id: str,
+    video_provider: VideoProvider,
+    staff_id: str | None = None,
+    client_id: str | None = None,
+) -> Meeting:
+    """Exactly one of `staff_id` (admin) or `client_id` (the client closing
+    a meeting they scheduled for their own community) identifies the actor
+    for the audit trail."""
     meeting = await db.get(Meeting, meeting_id)
     if meeting is None:
         raise MeetingRoomError("Meeting not found")
@@ -841,8 +861,8 @@ async def end_meeting(db: AsyncSession, *, meeting_id: str, staff_id: str, video
     meeting.ended_at = utcnow()
     await audit_service.record(
         db,
-        actor_type=ActorType.staff,
-        actor_id=staff_id,
+        actor_type=ActorType.staff if staff_id else ActorType.client,
+        actor_id=staff_id or client_id,
         action="meeting_room.meeting.end",
         room=RoomName.meeting_room,
         entity_type="meeting",

@@ -14,5 +14,7 @@ export const listReports = (conversationId) =>
 
 export const listMyMeetings = () => apiClient.get('/meeting-room/client/meetings').then((r) => r.data)
 export const getMyMeeting = (id) => apiClient.get(`/meeting-room/client/meetings/${id}`).then((r) => r.data)
+export const scheduleMyMeeting = (payload) => apiClient.post('/meeting-room/client/meetings', payload).then((r) => r.data)
+export const endMyMeeting = (id) => apiClient.post(`/meeting-room/client/meetings/${id}/end`).then((r) => r.data)
 export const joinMyMeeting = (id, identityId) =>
   apiClient.post(`/meeting-room/client/meetings/${id}/join`, identityId ? { identity_id: identityId } : {}).then((r) => r.data)

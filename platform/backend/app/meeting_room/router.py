@@ -338,6 +338,67 @@ async def client_get_meeting(
     return meeting
 
 
+@client_router.post("/meetings", response_model=schemas.MeetingOut, status_code=status.HTTP_201_CREATED)
+async def client_schedule_meeting(
+    req: schemas.ClientMeetingCreate,
+    client: ClientUser = Depends(get_current_client_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """A client schedules a meeting for their own community — always
+    `meeting_kind="community"` (the client-org restriction that gates the
+    admin's "meet with a client" picker doesn't apply here), and every
+    identity involved must be within the client's own scope."""
+    all_identity_ids = {req.host_identity_id, *req.participant_identity_ids}
+    for target_id in all_identity_ids:
+        if not await scope_service.is_ancestor_or_self(db, root_id=client.identity_id, target_id=target_id):
+            raise HTTPException(status_code=403, detail="This identity is outside your account's scope")
+    try:
+        meeting = await services.schedule_meeting(
+            db,
+            host_identity_id=req.host_identity_id,
+            scheduled_at=req.scheduled_at,
+            translate_live=req.translate_live,
+            notes=req.notes,
+            participant_identity_ids=req.participant_identity_ids,
+            meeting_kind="community",
+            client_id=client.id,
+            video_provider=get_video_provider(),
+        )
+    except services.MeetingRoomError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return meeting
+
+
+@client_router.post("/meetings/{meeting_id}/end", response_model=schemas.MeetingOut)
+async def client_end_meeting(
+    meeting_id: str,
+    client: ClientUser = Depends(get_current_client_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Closes a meeting's LiveKit room — available to any client whose
+    scope covers at least one participant, mirroring `client_get_meeting`'s
+    scope check rather than requiring the exact scheduler."""
+    meeting = await services.get_meeting_with_participants(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    participant_identity_ids = [p.identity_id for p in meeting.participants if p.identity_id]
+    is_scoped = any(
+        [
+            await scope_service.is_ancestor_or_self(db, root_id=client.identity_id, target_id=pid)
+            for pid in participant_identity_ids
+        ]
+    )
+    if not is_scoped:
+        raise HTTPException(status_code=403, detail="This meeting is outside your account's scope")
+    try:
+        meeting = await services.end_meeting(db, meeting_id=meeting_id, client_id=client.id, video_provider=get_video_provider())
+    except services.MeetingRoomError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return meeting
+
+
 @client_router.post("/meetings/{meeting_id}/join", response_model=schemas.JoinResponse)
 async def client_join_meeting(
     meeting_id: str,

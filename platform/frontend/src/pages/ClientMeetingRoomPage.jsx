@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import {
-  generateReport, getMyConversation, initiateRoom, joinMyMeeting, listMyConversations, listMyMeetings, listReports, sendMyReply,
+  endMyMeeting, generateReport, getMyConversation, initiateRoom, joinMyMeeting, listMyConversations, listMyMeetings,
+  listReports, scheduleMyMeeting, sendMyReply,
 } from '../api/clientMeetingRoom'
 import { listMyIdentities } from '../api/clientProfiles'
 import VideoCallRoom from '../components/VideoCallRoom'
@@ -67,14 +68,28 @@ function meetingRelativeTime(iso) {
   return meetingRtf.format(Math.round(diffMs / day), 'day')
 }
 
+const EMPTY_MEETING_FORM = {
+  host_identity_id: '', scheduled_at: '', translate_live: true, notes: '', participant_identity_ids: [],
+}
+
 function MeetingsTab() {
   const [meetings, setMeetings] = useState([])
+  const [identities, setIdentities] = useState([])
   const [call, setCall] = useState(null)
   const [error, setError] = useState('')
   const [joiningId, setJoiningId] = useState('')
+  const [pending, setPending] = useState({}) // { [meetingId]: 'end' }
+  const [showSchedule, setShowSchedule] = useState(false)
+  const [form, setForm] = useState(EMPTY_MEETING_FORM)
+  const [scheduling, setScheduling] = useState(false)
+  const [success, setSuccess] = useState('')
+
+  const identityName = (id) => identities.find((i) => i.id === id)?.name || `${id.slice(0, 8)}…`
 
   async function refresh() {
-    setMeetings(await listMyMeetings())
+    const [ms, ids] = await Promise.all([listMyMeetings(), listMyIdentities()])
+    setMeetings(ms)
+    setIdentities(ids)
   }
 
   useEffect(() => { refresh() }, [])
@@ -86,6 +101,34 @@ function MeetingsTab() {
     const id = setInterval(refresh, 5000)
     return () => clearInterval(id)
   }, [call])
+
+  function toggleParticipant(id) {
+    setForm((f) => ({
+      ...f,
+      participant_identity_ids: f.participant_identity_ids.includes(id)
+        ? f.participant_identity_ids.filter((x) => x !== id)
+        : [...f.participant_identity_ids, id],
+    }))
+  }
+
+  async function handleSchedule(e) {
+    e.preventDefault()
+    setError('')
+    setSuccess('')
+    setScheduling(true)
+    try {
+      await scheduleMyMeeting({ ...form, scheduled_at: new Date(form.scheduled_at).toISOString() })
+      setForm(EMPTY_MEETING_FORM)
+      setShowSchedule(false)
+      setSuccess('Meeting scheduled — its LiveKit room is ready now.')
+      setTimeout(() => setSuccess(''), 4000)
+      await refresh()
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not schedule meeting')
+    } finally {
+      setScheduling(false)
+    }
+  }
 
   async function handleJoin(meetingId) {
     setError('')
@@ -100,6 +143,20 @@ function MeetingsTab() {
     }
   }
 
+  async function handleEnd(meetingId) {
+    setError('')
+    setPending((p) => ({ ...p, [meetingId]: 'end' }))
+    try {
+      await endMyMeeting(meetingId)
+      setCall(null)
+      await refresh()
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not end meeting')
+    } finally {
+      setPending((p) => { const n = { ...p }; delete n[meetingId]; return n })
+    }
+  }
+
   if (call) {
     return (
       <div>
@@ -111,7 +168,67 @@ function MeetingsTab() {
 
   return (
     <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+        <p style={{ color: 'var(--sub)', margin: 0 }}>
+          Schedule a video meeting with your own community — a LiveKit room is created immediately.
+        </p>
+        <button className="btn btn-primary" onClick={() => setShowSchedule(!showSchedule)}>
+          {showSchedule ? 'Cancel' : '+ Schedule meeting'}
+        </button>
+      </div>
+
       {error && <div className="badge badge-alert" style={{ display: 'block', marginBottom: 12, padding: '8px 12px' }}>{error}</div>}
+      {success && <div className="badge badge-agent" style={{ display: 'block', marginBottom: 12, padding: '8px 12px' }}>{success}</div>}
+
+      {showSchedule && (
+        <form onSubmit={handleSchedule} className="card" style={{ padding: 16, marginBottom: 20, display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
+          <select required value={form.host_identity_id} onChange={(e) => setForm({ ...form, host_identity_id: e.target.value })} style={inputStyle}>
+            <option value="">— who is this meeting with? —</option>
+            {identities.map((i) => <option key={i.id} value={i.id}>{i.name} ({i.id_type})</option>)}
+          </select>
+          <input
+            type="datetime-local" required value={form.scheduled_at}
+            onChange={(e) => setForm({ ...form, scheduled_at: e.target.value })}
+            style={inputStyle}
+          />
+          <div style={{ gridColumn: '1 / -1' }}>
+            <div style={{ fontSize: 12, color: 'var(--sub)', marginBottom: 4 }}>
+              Other members to invite
+              {form.participant_identity_ids.length > 0 && (
+                <span className="badge badge-account" style={{ marginLeft: 6 }}>{form.participant_identity_ids.length} selected</span>
+              )}
+            </div>
+            <div style={{ border: '1px solid var(--line)', borderRadius: 8, maxHeight: 150, overflowY: 'auto' }}>
+              {identities.filter((i) => i.id !== form.host_identity_id).map((i) => {
+                const checked = form.participant_identity_ids.includes(i.id)
+                return (
+                  <label
+                    key={i.id}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', fontSize: 13, cursor: 'pointer',
+                      background: checked ? 'var(--token-bg)' : 'transparent',
+                      borderBottom: '1px solid var(--line)',
+                    }}
+                  >
+                    <input type="checkbox" checked={checked} onChange={() => toggleParticipant(i.id)} />
+                    {i.name}
+                  </label>
+                )
+              })}
+              {identities.length === 0 && <div style={{ padding: 10, color: 'var(--sub)', fontSize: 12 }}>No community members yet.</div>}
+            </div>
+          </div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+            <input type="checkbox" checked={form.translate_live} onChange={(e) => setForm({ ...form, translate_live: e.target.checked })} />
+            Translate live
+          </label>
+          <input placeholder="Notes" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} style={inputStyle} />
+          <button type="submit" className="btn btn-primary" disabled={scheduling} style={{ gridColumn: '1 / -1' }}>
+            {scheduling ? 'Scheduling…' : 'Schedule'}
+          </button>
+        </form>
+      )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {meetings.map((m) => (
           <div key={m.id} className="card" style={{ padding: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -119,15 +236,23 @@ function MeetingsTab() {
               <span className={`badge ${MEETING_STATUS_BADGE[m.status] || 'badge-room'} ${m.status === 'live' ? 'badge-pulse' : ''}`}>
                 {m.status}
               </span>{' '}
+              {m.host_identity_id && <strong style={{ fontSize: 13 }}>{identityName(m.host_identity_id)}</strong>}{' '}
               <span style={{ fontSize: 12, color: 'var(--sub)' }}>{new Date(m.scheduled_at).toLocaleString()}</span>
               <span style={{ fontSize: 11, color: 'var(--sub)', marginLeft: 6 }}>({meetingRelativeTime(m.scheduled_at)})</span>
               {m.notes && <div style={{ fontSize: 12, color: 'var(--sub)', marginTop: 4 }}>{m.notes}</div>}
             </div>
-            {(m.status === 'scheduled' || m.status === 'live') && (
-              <button className="btn btn-primary" disabled={joiningId === m.id} onClick={() => handleJoin(m.id)}>
-                {joiningId === m.id ? 'Joining…' : 'Join'}
-              </button>
-            )}
+            <div style={{ display: 'flex', gap: 6 }}>
+              {(m.status === 'scheduled' || m.status === 'live') && (
+                <button className="btn btn-primary" disabled={joiningId === m.id} onClick={() => handleJoin(m.id)}>
+                  {joiningId === m.id ? 'Joining…' : 'Join'}
+                </button>
+              )}
+              {m.status === 'live' && (
+                <button className="btn" disabled={!!pending[m.id]} onClick={() => handleEnd(m.id)}>
+                  {pending[m.id] === 'end' ? 'Closing…' : 'Close room'}
+                </button>
+              )}
+            </div>
           </div>
         ))}
         {meetings.length === 0 && <div className="card" style={{ padding: 20, color: 'var(--sub)' }}>No meetings scheduled.</div>}
