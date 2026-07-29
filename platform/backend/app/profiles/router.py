@@ -1009,6 +1009,46 @@ async def client_list_community_members(
     return out
 
 
+@client_router.post("/communities/{group_id}/members", response_model=schemas.CommunityMemberOut, status_code=status.HTTP_201_CREATED)
+async def client_add_community_member(
+    group_id: str,
+    req: schemas.MemberRegistrationRequest,
+    client: ClientUser | ClientStaffUser = Depends(get_current_client_actor),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lets the client add a member directly from the dashboard with a
+    registration number it already knows, instead of only being able to
+    pre-issue roster numbers and wait for self-registration via the
+    invite link. Mirrors `public_register_member`'s orchestration."""
+    from app.meeting_room import services as meeting_room_services
+
+    await identity_scope(identity_id=group_id, client=client, db=db)
+    actor_type = _actor_type_for(client)
+    try:
+        identity = await services.client_create_member(
+            db, group_identity_id=group_id, name=req.name, mobile_number=req.mobile_number,
+            ilc_registration_number=req.ilc_registration_number, email=req.email, extra_info=req.extra_info,
+            actor_type=actor_type, actor_id=client.id,
+            actor_client_id=client.id if isinstance(client, ClientUser) else None,
+        )
+        await meeting_room_services.link_phone_number(
+            db, req.mobile_number, identity.id, actor_type=actor_type, actor_id=client.id
+        )
+        await services.record_consent(
+            db, identity.id, context=ConsentContext.onboarding, granted=True, staff_id=None,
+            note="Captured via client dashboard direct member addition",
+        )
+    except services.ProfilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    profile = await services.get_member_profile(db, identity.id)
+    return schemas.CommunityMemberOut(
+        id=identity.id, name=identity.name, is_active=identity.is_active, created_at=identity.created_at,
+        profile=schemas.MemberProfileOut.model_validate(profile) if profile else None,
+        conversation_id=None,
+    )
+
+
 @client_router.post("/communities/{group_id}/invite/regenerate", response_model=schemas.GroupInviteOut)
 async def client_regenerate_invite(
     group_id: str, client: ClientUser | ClientStaffUser = Depends(get_current_client_actor), db: AsyncSession = Depends(get_db)
@@ -1112,14 +1152,9 @@ async def public_register_member(token: str, req: schemas.MemberRegistrationRequ
     group = await services.get_identity(db, invite.identity_id)
 
     try:
-        identity = await services.create_identity(
-            db, name=req.name, id_type=IdentityType.member, parent_id=invite.identity_id,
-            actor_type=ActorType.system, actor_id=None,
-        )
-        await services.create_member_profile(
-            db, identity_id=identity.id, group_identity_id=invite.identity_id,
-            ilc_registration_number=req.ilc_registration_number,
-            email=req.email, phone_number=req.mobile_number,
+        identity, _created = await services.register_member(
+            db, group_identity_id=invite.identity_id, name=req.name, email=req.email,
+            phone_number=req.mobile_number, ilc_registration_number=req.ilc_registration_number,
             extra_info=req.extra_info, source_invite_id=invite.id,
         )
         await meeting_room_services.link_phone_number(

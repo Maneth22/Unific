@@ -96,3 +96,98 @@ async def test_roster_valid_duplicate_and_unknown_numbers():
                 )
     finally:
         await _cleanup(org_id, ilc_id)
+
+
+@pytest.mark.asyncio
+async def test_register_member_creates_fresh_identity_for_unclaimed_number():
+    org_id, ilc_id = await _build_org_and_ilc_group()
+    try:
+        async with AsyncSessionLocal() as db:
+            await services.add_roster_numbers(db, group_identity_id=ilc_id, numbers=["777"], actor_client_id=None)
+            await db.commit()
+
+        async with AsyncSessionLocal() as db:
+            identity, created = await services.register_member(
+                db, group_identity_id=ilc_id, name="Member F", email="", phone_number="+910000000006",
+                ilc_registration_number="777", extra_info={}, source_invite_id=None,
+            )
+            await db.commit()
+            assert created is True
+            profile = await services.get_member_profile(db, identity.id)
+            assert profile.registered_via == "public_form"
+    finally:
+        await _cleanup(org_id, ilc_id)
+
+
+@pytest.mark.asyncio
+async def test_register_member_approves_and_updates_a_client_pre_instructed_member():
+    org_id, ilc_id = await _build_org_and_ilc_group()
+    try:
+        # Client pre-instructs "dasun" against number "321" with a placeholder phone.
+        async with AsyncSessionLocal() as db:
+            pre_instructed = await services.client_create_member(
+                db, group_identity_id=ilc_id, name="dasun", mobile_number="+910000000000",
+                ilc_registration_number="321", email="", extra_info={},
+                actor_type=ActorType.system, actor_id=None, actor_client_id=None,
+            )
+            await db.commit()
+            pre_instructed_id = pre_instructed.id
+
+        # The real member self-registers with the same number and their real
+        # phone — approved and merged into the existing identity, not rejected
+        # and not turned into a second "dasun".
+        async with AsyncSessionLocal() as db:
+            identity, created = await services.register_member(
+                db, group_identity_id=ilc_id, name="Dasun Perera", email="dasun@example.com",
+                phone_number="+94711234567", ilc_registration_number="321", extra_info={"village": "Kandy"},
+                source_invite_id=None,
+            )
+            await db.commit()
+            assert created is False
+            assert identity.id == pre_instructed_id
+            assert identity.name == "Dasun Perera"
+            profile = await services.get_member_profile(db, identity.id)
+            assert profile.phone_number == "+94711234567"
+            assert profile.email == "dasun@example.com"
+            assert profile.extra_info == {"village": "Kandy"}
+            assert profile.registered_via == "public_form"
+
+        # Now that it's a real, confirmed self-registration, a second attempt
+        # on the same number is rejected like any other already-used number.
+        async with AsyncSessionLocal() as db:
+            with pytest.raises(services.ProfilesError, match="already been used"):
+                await services.register_member(
+                    db, group_identity_id=ilc_id, name="Impostor", email="", phone_number="+910000000009",
+                    ilc_registration_number="321", extra_info={}, source_invite_id=None,
+                )
+    finally:
+        await _cleanup(org_id, ilc_id)
+
+
+@pytest.mark.asyncio
+async def test_client_create_member_auto_issues_roster_number_and_rejects_reuse():
+    org_id, ilc_id = await _build_org_and_ilc_group()
+    try:
+        # No roster entry pre-issued for "555" — client_create_member issues
+        # one on the fly instead of requiring a separate "add to roster" step.
+        async with AsyncSessionLocal() as db:
+            identity = await services.client_create_member(
+                db, group_identity_id=ilc_id, name="Member D", mobile_number="+910000000004",
+                ilc_registration_number="555", email="", extra_info={},
+                actor_type=ActorType.system, actor_id=None, actor_client_id=None,
+            )
+            await db.commit()
+            profile = await services.get_member_profile(db, identity.id)
+            assert profile.registered_via == "client_added"
+            assert profile.ilc_roster_entry_id is not None
+
+        # Re-using the same (now-claimed) number for a second member is rejected.
+        async with AsyncSessionLocal() as db:
+            with pytest.raises(services.ProfilesError, match="already been used"):
+                await services.client_create_member(
+                    db, group_identity_id=ilc_id, name="Member E", mobile_number="+910000000005",
+                    ilc_registration_number="555", email="", extra_info={},
+                    actor_type=ActorType.system, actor_id=None, actor_client_id=None,
+                )
+    finally:
+        await _cleanup(org_id, ilc_id)

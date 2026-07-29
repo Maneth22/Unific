@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { generateReport, listReports } from '../api/clientMeetingRoom'
-import { addRosterNumbers, listCommunityMembers, listRoster } from '../api/clientProfiles'
+import { addCommunityMember, addRosterNumbers, listCommunityMembers, listRoster } from '../api/clientProfiles'
+
+const emptyMemberForm = { name: '', mobile_number: '', ilc_registration_number: '', email: '' }
 
 export default function ClientCommunityDetailPage() {
   const { groupId } = useParams()
@@ -13,6 +15,10 @@ export default function ClientCommunityDetailPage() {
   const [rosterError, setRosterError] = useState('')
   const [addingRoster, setAddingRoster] = useState(false)
   const [expandedId, setExpandedId] = useState('')
+  const [showAddMember, setShowAddMember] = useState(false)
+  const [memberForm, setMemberForm] = useState(emptyMemberForm)
+  const [memberError, setMemberError] = useState('')
+  const [addingMember, setAddingMember] = useState(false)
   const [reportsByMember, setReportsByMember] = useState({})
   const [generatingId, setGeneratingId] = useState('')
 
@@ -37,6 +43,22 @@ export default function ClientCommunityDetailPage() {
       setRosterError(err.response?.data?.detail || 'Could not add roster numbers')
     } finally {
       setAddingRoster(false)
+    }
+  }
+
+  async function handleAddMember(e) {
+    e.preventDefault()
+    setMemberError('')
+    setAddingMember(true)
+    try {
+      await addCommunityMember(groupId, memberForm)
+      setMemberForm(emptyMemberForm)
+      setShowAddMember(false)
+      await refresh()
+    } catch (err) {
+      setMemberError(err.response?.data?.detail || 'Could not add this member')
+    } finally {
+      setAddingMember(false)
     }
   }
 
@@ -116,6 +138,53 @@ export default function ClientCommunityDetailPage() {
               {roster.length === 0 && <span style={{ fontSize: 12, color: 'var(--sub)' }}>No roster numbers added yet.</span>}
             </div>
           </div>
+        )}
+      </div>
+
+      <div className="card" style={{ padding: 16, marginBottom: 20 }}>
+        <div
+          style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+          onClick={() => setShowAddMember(!showAddMember)}
+        >
+          <div style={{ fontWeight: 700 }}>Add a member</div>
+          <span style={{ fontSize: 12, color: 'var(--sub)' }}>{showAddMember ? 'Hide' : 'Add'}</span>
+        </div>
+
+        {showAddMember && (
+          <form onSubmit={handleAddMember} style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <p style={{ fontSize: 12, color: 'var(--sub)', margin: 0 }}>
+              Add a member directly with their registration number — they don't need to self-register via the
+              invite link. If the number hasn't been added to the roster yet, it's issued automatically.
+            </p>
+            {memberError && <div className="badge badge-alert" style={{ display: 'block', padding: '8px 12px' }}>{memberError}</div>}
+            <input
+              placeholder="Name"
+              value={memberForm.name}
+              onChange={(e) => setMemberForm({ ...memberForm, name: e.target.value })}
+              style={{ padding: 8, border: '1px solid var(--line)', borderRadius: 8 }}
+            />
+            <input
+              placeholder="Mobile number (WhatsApp)"
+              value={memberForm.mobile_number}
+              onChange={(e) => setMemberForm({ ...memberForm, mobile_number: e.target.value })}
+              style={{ padding: 8, border: '1px solid var(--line)', borderRadius: 8 }}
+            />
+            <input
+              placeholder="Registration number"
+              value={memberForm.ilc_registration_number}
+              onChange={(e) => setMemberForm({ ...memberForm, ilc_registration_number: e.target.value })}
+              style={{ padding: 8, border: '1px solid var(--line)', borderRadius: 8 }}
+            />
+            <input
+              placeholder="Email (optional)"
+              value={memberForm.email}
+              onChange={(e) => setMemberForm({ ...memberForm, email: e.target.value })}
+              style={{ padding: 8, border: '1px solid var(--line)', borderRadius: 8 }}
+            />
+            <button type="submit" className="btn btn-primary" disabled={addingMember} style={{ alignSelf: 'flex-start' }}>
+              {addingMember ? 'Adding…' : 'Add member'}
+            </button>
+          </form>
         )}
       </div>
 

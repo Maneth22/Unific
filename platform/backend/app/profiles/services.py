@@ -628,6 +628,7 @@ async def create_member_profile(
     phone_number: str,
     extra_info: dict,
     source_invite_id: str | None,
+    registered_via: str = "public_form",
 ) -> MemberProfile:
     """Verifies `ilc_registration_number` against the client's pre-issued
     roster for this group before creating the member — an unrecognized
@@ -650,7 +651,7 @@ async def create_member_profile(
         email=email,
         phone_number=phone_number,
         extra_info=extra_info,
-        registered_via="public_form",
+        registered_via=registered_via,
         source_invite_id=source_invite_id,
         ilc_roster_entry_id=roster_entry.id,
     )
@@ -666,6 +667,118 @@ async def create_member_profile(
 
 async def get_member_profile(db: AsyncSession, identity_id: str) -> MemberProfile | None:
     return await db.get(MemberProfile, identity_id)
+
+
+async def register_member(
+    db: AsyncSession,
+    *,
+    group_identity_id: str,
+    name: str,
+    email: str,
+    phone_number: str,
+    ilc_registration_number: str,
+    extra_info: dict,
+    source_invite_id: str | None,
+) -> tuple[Identity, bool]:
+    """Public self-registration entry point. A number the client already
+    pre-instructed via `client_create_member` (`registered_via ==
+    "client_added"`, not yet self-confirmed) is *approved*: the existing
+    member is updated with what was just submitted rather than being
+    rejected as a duplicate or turned into a second identity. A number
+    that's already been through a real self-registration is still
+    rejected as used — only one confirmation per number.
+
+    Returns `(identity, created)` — `created` is False when this call
+    updated a pre-instructed member instead of creating a new one."""
+    roster_result = await db.execute(
+        select(IlcMemberRoster).where(
+            IlcMemberRoster.group_identity_id == group_identity_id,
+            IlcMemberRoster.ilc_registration_number == ilc_registration_number,
+        )
+    )
+    roster_entry = roster_result.scalar_one_or_none()
+    if roster_entry is None:
+        raise ProfilesError("This registration number is not recognized for this group")
+
+    if roster_entry.is_claimed:
+        existing_profile = await db.get(MemberProfile, roster_entry.claimed_by_identity_id)
+        if existing_profile is None or existing_profile.registered_via != "client_added":
+            raise ProfilesError("This registration number has already been used")
+
+        identity = await db.get(Identity, roster_entry.claimed_by_identity_id)
+        identity.name = name
+        existing_profile.email = email
+        existing_profile.phone_number = phone_number
+        existing_profile.extra_info = extra_info
+        existing_profile.registered_via = "public_form"
+        existing_profile.updated_at = utcnow()
+        await db.flush()
+        return identity, False
+
+    identity = await create_identity(
+        db, name=name, id_type=IdentityType.member, parent_id=group_identity_id,
+        actor_type=ActorType.system, actor_id=None,
+    )
+    await create_member_profile(
+        db, identity_id=identity.id, group_identity_id=group_identity_id,
+        ilc_registration_number=ilc_registration_number,
+        email=email, phone_number=phone_number, extra_info=extra_info,
+        source_invite_id=source_invite_id, registered_via="public_form",
+    )
+    return identity, True
+
+
+async def client_create_member(
+    db: AsyncSession,
+    *,
+    group_identity_id: str,
+    name: str,
+    mobile_number: str,
+    ilc_registration_number: str,
+    email: str,
+    extra_info: dict,
+    actor_type: ActorType,
+    actor_id: str | None,
+    actor_client_id: str | None,
+) -> Identity:
+    """Client-dashboard counterpart to `public_register_member`: the
+    client already knows the member's registration number, so this skips
+    the invite-link/self-registration step entirely. If the number hasn't
+    been pre-issued to the roster yet, it's issued here on the fly — the
+    client doesn't need a separate "add to roster" step first."""
+    group = await db.get(Identity, group_identity_id)
+    if group is None or group.id_type != IdentityType.group:
+        raise ProfilesError("Group not found")
+
+    roster_result = await db.execute(
+        select(IlcMemberRoster).where(
+            IlcMemberRoster.group_identity_id == group_identity_id,
+            IlcMemberRoster.ilc_registration_number == ilc_registration_number,
+        )
+    )
+    roster_entry = roster_result.scalar_one_or_none()
+    if roster_entry is None:
+        roster_entry = IlcMemberRoster(
+            group_identity_id=group_identity_id,
+            ilc_registration_number=ilc_registration_number,
+            created_by_client_id=actor_client_id,
+        )
+        db.add(roster_entry)
+        await db.flush()
+    elif roster_entry.is_claimed:
+        raise ProfilesError("This registration number has already been used")
+
+    identity = await create_identity(
+        db, name=name, id_type=IdentityType.member, parent_id=group_identity_id,
+        actor_type=actor_type, actor_id=actor_id,
+    )
+    await create_member_profile(
+        db, identity_id=identity.id, group_identity_id=group_identity_id,
+        ilc_registration_number=ilc_registration_number,
+        email=email, phone_number=mobile_number, extra_info=extra_info,
+        source_invite_id=None, registered_via="client_added",
+    )
+    return identity
 
 
 async def list_members(db: AsyncSession, group_id: str) -> list[Identity]:
