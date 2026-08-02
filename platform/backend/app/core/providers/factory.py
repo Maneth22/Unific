@@ -4,9 +4,12 @@ that reads `settings.*_provider` — services depend on the ABCs from
 """
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 from app.core.providers.base import ReplyGenerator, TranslationProvider, VideoProvider, WhatsAppProvider
 from app.core.providers.mock_translation import MockTranslationProvider
 from app.core.providers.mock_video_provider import MockVideoProvider
@@ -56,6 +59,23 @@ def get_comms_agent():
 
 @lru_cache
 def get_video_provider() -> VideoProvider:
+    if settings.video_provider != "livekit":
+        if settings.livekit_url or settings.livekit_api_key or settings.livekit_api_secret:
+            logger.warning(
+                "LIVEKIT_URL/API_KEY/API_SECRET are set but VIDEO_PROVIDER=%r (not "
+                "'livekit') — falling back to MockVideoProvider, which mints fake "
+                "tokens. This is almost always an unset or misspelled VIDEO_PROVIDER "
+                "env var; set VIDEO_PROVIDER=livekit to use the configured credentials.",
+                settings.video_provider,
+            )
+        if settings.is_production:
+            logger.error(
+                "Running in production with VIDEO_PROVIDER=%r — every meeting join "
+                "will receive a fake MockVideoProvider token and no participant will "
+                "get real audio, video, or chat. Set VIDEO_PROVIDER=livekit.",
+                settings.video_provider,
+            )
+
     if settings.video_provider == "livekit":
         from app.core.providers.livekit_video_provider import LiveKitVideoProvider
 

@@ -29,6 +29,7 @@ export default function StaffPortalLayout() {
           {[
             { to: '/portal', label: 'My Tasks', end: true },
             { to: '/portal/inbox', label: 'Inbox' },
+            { to: '/portal/meetings', label: 'Meetings' },
           ].map((item) => (
             <NavLink
               key={item.to}

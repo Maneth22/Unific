@@ -3,12 +3,15 @@ wires the app together — no business logic lives here.
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.accounts.router import router as accounts_router
 from app.auth.router import router as staff_auth_router
 from app.config import settings
+from app.core.providers.factory import get_video_provider
 from app.meeting_room.router import client_router as meeting_room_client_router
 from app.meeting_room.router import public_router as meeting_room_public_router
 from app.meeting_room.router import router as meeting_room_router
@@ -20,10 +23,20 @@ from app.profiles.router import router as profiles_router
 from app.staff_directory.router import router as staff_directory_router
 from app.tasking.router import router as tasking_router
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Forces the video-provider misconfiguration warnings (see factory.py) to
+    # fire in deploy logs at boot, rather than lazily on the first meeting join.
+    get_video_provider()
+    yield
+
+
 app = FastAPI(
     title="UNIFIC Platform API",
     description="Task 1 (Accounts) · Task 2 (Profiles) · Task 3 (Meeting Room)",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(SecurityHeadersMiddleware)

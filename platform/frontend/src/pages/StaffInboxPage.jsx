@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { listInbox, markMessageRead, sendMessage } from '../api/tasking'
 import { listStaffLite } from '../api/staffDirectory'
@@ -99,6 +100,15 @@ export default function StaffInboxPage() {
                 {m.related_meeting_id && <span className="badge badge-id" style={{ marginRight: 6 }}>meeting</span>}
                 <strong>{m.subject || '(no subject)'}</strong>
                 <div style={{ fontSize: 13, color: 'var(--sub)', marginTop: 4 }}>{m.body}</div>
+                {m.related_meeting_id && (
+                  <Link
+                    to="/portal/meetings"
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ fontSize: 12, fontWeight: 700, color: 'var(--token)' }}
+                  >
+                    Go to meeting &rarr;
+                  </Link>
+                )}
               </div>
               <span style={{ fontSize: 12, color: 'var(--sub)', whiteSpace: 'nowrap' }}>{new Date(m.created_at).toLocaleString()}</span>
             </div>

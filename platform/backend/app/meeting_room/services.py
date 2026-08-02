@@ -680,6 +680,21 @@ async def get_invites_for_meeting(db: AsyncSession, meeting_id: str) -> list[Mee
     return list(result.scalars().all())
 
 
+async def list_staff_meetings(db: AsyncSession, staff_id: str) -> list[Meeting]:
+    """Meetings where this staff account is a participant — invited at
+    scheduling time (see `schedule_meeting`'s `staff_participant_ids`) or
+    added on first join (see `mint_staff_join`). Mirrors
+    `list_client_meetings`'s shape for the client dashboard."""
+    result = await db.execute(
+        select(Meeting)
+        .join(MeetingParticipant, MeetingParticipant.meeting_id == Meeting.id)
+        .where(MeetingParticipant.staff_user_id == staff_id)
+        .order_by(Meeting.scheduled_at.desc())
+        .distinct()
+    )
+    return list(result.scalars().all())
+
+
 async def list_client_meetings(db: AsyncSession, identity_ids: list[str]) -> list[Meeting]:
     """Meetings where any of the caller's own-or-descendant identities is
     a participant — the client-dashboard scope boundary, same shape as

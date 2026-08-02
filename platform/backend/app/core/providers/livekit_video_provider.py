@@ -37,7 +37,15 @@ class LiveKitVideoProvider(VideoProvider):
             lk_api.AccessToken(self.api_key, self.api_secret)
             .with_identity(participant_identity)
             .with_name(participant_name)
-            .with_grants(lk_api.VideoGrants(room_join=True, room=room_name))
+            .with_grants(
+                lk_api.VideoGrants(
+                    room_join=True,
+                    room=room_name,
+                    can_publish=True,
+                    can_subscribe=True,
+                    can_publish_data=True,
+                )
+            )
             .with_ttl(timedelta(seconds=ttl_seconds))
         )
         return token.to_jwt()

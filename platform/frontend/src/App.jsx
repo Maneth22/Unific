@@ -18,6 +18,7 @@ import StaffManagementPage from './pages/StaffManagementPage'
 import StaffRegistrationRequestsPage from './pages/StaffRegistrationRequestsPage'
 import StaffTasksPage from './pages/StaffTasksPage'
 import StaffInboxPage from './pages/StaffInboxPage'
+import StaffMeetingsPage from './pages/StaffMeetingsPage'
 import ClientAccountsPage from './pages/ClientAccountsPage'
 import ClientCommunitiesPage from './pages/ClientCommunitiesPage'
 import ClientCommunityDetailPage from './pages/ClientCommunityDetailPage'
@@ -72,6 +73,7 @@ export default function App() {
             <Route element={<StaffPortalLayout />}>
               <Route path="/portal" element={<StaffTasksPage />} />
               <Route path="/portal/inbox" element={<StaffInboxPage />} />
+              <Route path="/portal/meetings" element={<StaffMeetingsPage />} />
             </Route>
           </Route>
         </Route>

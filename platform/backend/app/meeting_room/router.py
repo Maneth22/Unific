@@ -476,6 +476,14 @@ async def list_meetings(staff: StaffUser = Depends(admin), db: AsyncSession = De
     return await services.list_meetings(db)
 
 
+@router.get("/my-meetings", response_model=list[schemas.MeetingOut])
+async def list_my_meetings(staff: StaffUser = Depends(require_any_staff), db: AsyncSession = Depends(get_db)):
+    """Any active staff account's own view — meetings they were invited to
+    (or have already joined), not the full admin list. Backs the Meetings
+    tab in the regular-staff portal."""
+    return await services.list_staff_meetings(db, staff.id)
+
+
 @router.get("/meetings/{meeting_id}", response_model=schemas.MeetingDetailOut)
 async def get_meeting(meeting_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     meeting = await services.get_meeting_with_participants(db, meeting_id)
