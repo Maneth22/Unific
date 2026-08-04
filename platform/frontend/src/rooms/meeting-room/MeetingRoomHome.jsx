@@ -25,7 +25,7 @@ export default function MeetingRoomHome() {
         meeting, and the translation, adapted to reach community members through WhatsApp.
       </p>
 
-      <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 20 }}>
+      <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 20, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
         {TABS.map((t) => (
           <button
             key={t.key}

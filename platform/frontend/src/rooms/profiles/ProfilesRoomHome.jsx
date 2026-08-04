@@ -38,7 +38,7 @@ export default function ProfilesRoomHome() {
         checked against the registry, before it reaches the Meeting Room.
       </p>
 
-      <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 20 }}>
+      <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 20, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
         {TOP_TABS.map((t) => (
           <button
             key={t.key}
@@ -57,8 +57,8 @@ export default function ProfilesRoomHome() {
       {topTab === 'staff' ? (
         <StaffDirectoryPanel />
       ) : (
-        <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }}>
-          <div style={{ width: 320, flexShrink: 0 }}>
+        <div className="master-detail" style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }}>
+          <div className="master-detail-list" style={{ width: 320, flexShrink: 0 }}>
             <CreateClientOrgForm onCreated={() => setTreeRefreshKey((k) => k + 1)} />
             <IdentityTree key={treeRefreshKey} selectedId={selectedId} onSelect={setSelectedId} />
           </div>
@@ -70,7 +70,7 @@ export default function ProfilesRoomHome() {
               </div>
             ) : (
               <>
-                <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 20 }}>
+                <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 20, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
                   {TABS.map((t) => (
                     <button
                       key={t.key}

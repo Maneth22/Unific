@@ -31,7 +31,7 @@ export default function AccountsRoomHome() {
         uses. Internal only — no member reaches this room.
       </p>
 
-      <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 20 }}>
+      <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--line)', marginBottom: 20, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
         {TABS.map((t) => (
           <button
             key={t.key}

@@ -1,0 +1,229 @@
+/* Call-specific styling — re-themes @livekit/components-styles default
+   classes with this app's own tokens (theme/tokens.css) so the call UI reads
+   as one system with the rest of the app instead of LiveKit's separate
+   default lk-prefixed theme, plus the new cq-prefixed classes for the custom
+   tile body, control bar, and device-error bubble. Colocated here (not
+   appended to theme/tokens.css) since it's a large block of selectors that
+   only ever apply while a call is mounted. */
+
+/* The call's own self-contained box. LiveKit's ConnectionStateToast,
+   StartAudio button, and (on narrow screens) the Chat panel all default to
+   `position: fixed`, anchored to the viewport — inside this app that means
+   they paste themselves over the sidebar/topbar instead of staying inside
+   the call. `transform` (any non-none value) makes this element the
+   containing block for `position: fixed` descendants per the CSS spec, so
+   those overlays end up confined to this box instead of the whole page.
+   `overflow: hidden` then guarantees this box never forces the page itself
+   to scroll — content that would otherwise overflow (see the tile-sizing
+   fix below for why that used to happen) gets clipped at this boundary
+   instead of expanding the page's own scrollable area. The device-error
+   bubble stays safely inside these bounds (verified: it renders well above
+   the control bar, nowhere near this box's edges). Sizing is clamped (not a
+   bare vh number) so it fits within the viewport alongside the app's own
+   chrome on any device instead of overflowing/underflowing it. */
+.cq-call-room {
+  position: relative;
+  overflow: hidden;
+  transform: translateZ(0);
+  width: 100%;
+  height: clamp(360px, 75vh, 720px);
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+
+@media (max-width: 767px) {
+  .cq-call-room {
+    height: clamp(320px, 65vh, 520px);
+  }
+}
+
+.cq-call-shell {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* Square-ish tiles, capped so a tile can never outgrow this box (the actual
+   bug: an aspect-ratio:1/1 tile in a full-width single-column grid cell —
+   e.g. a solo participant — had the browser derive its height FROM that
+   full width, blowing the tile up to ~1900px tall and forcing the whole
+   page to scroll). GridLayout's own selectGridLayout already picks
+   column/row counts to keep cells reasonably proportioned for the given
+   participant count and container size; this just adds a hard ceiling
+   (max-width/max-height) so no single tile can ever dominate the box, and
+   centers it in its cell when the cap applies. object-fit:cover on the
+   video (see .cq-tile-video) avoids distortion when the cell itself isn't
+   square. */
+.lk-participant-tile {
+  border-radius: var(--radius);
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  max-width: 480px;
+  max-height: 480px;
+  justify-self: center;
+  align-self: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+
+.lk-grid-layout {
+  gap: 10px;
+  padding: 10px;
+}
+
+/* The big focused/spotlight tile (screen share, or a pinned participant)
+   fills all available space instead of being capped like grid tiles — it's
+   a direct child of .lk-focus-layout (the carousel's tiles are nested
+   inside .lk-carousel instead, so this doesn't touch those). */
+.lk-focus-layout > .lk-participant-tile {
+  max-width: none;
+  max-height: none;
+  justify-self: stretch;
+  align-self: stretch;
+}
+
+.lk-focus-layout-wrapper {
+  padding: 10px;
+}
+
+/* Active-speaker highlight — pure CSS off the data attribute
+   useParticipantTile already stamps on every tile root. */
+.lk-participant-tile[data-lk-speaking='true'] {
+  outline: 3px solid var(--green);
+  outline-offset: -3px;
+}
+
+.cq-tile-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cq-tile-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--slate-bg);
+}
+
+.cq-tile-avatar {
+  width: clamp(32px, 30%, 72px);
+  height: clamp(32px, 30%, 72px);
+  border-radius: 50%;
+  background: var(--slate);
+  color: var(--surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: clamp(12px, 40%, 22px);
+}
+
+.cq-tile-meta {
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+}
+
+/* Control bar. Height matches --lk-control-bar-height (the space the grid/
+   focus wrapper above it already reserves via calc(100% - that variable) in
+   LiveKit's default CSS) so this custom bar doesn't overlap or leave a gap
+   under the tiles above it. */
+.cq-control-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  /* min-height, not height: setting overflow-x here to scroll narrow
+     screens would force overflow-y to also become non-visible per the CSS
+     overflow spec (an axis set to non-visible pulls the other axis off
+     'visible' too), which clipped the device-error bubble that opens
+     upward from a button inside this bar. flex-wrap handles narrow screens
+     instead, and min-height lets a wrapped second row grow the bar rather
+     than clipping it. */
+  min-height: var(--lk-control-bar-height, 69px);
+  box-sizing: border-box;
+  padding: 10px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+
+.cq-btn-anchor {
+  position: relative;
+  display: inline-block;
+}
+
+.cq-leave-btn {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
+/* Device-error bubble — anchored above the mic/camera button via its
+   .cq-btn-anchor parent. */
+.cq-device-bubble {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 220px;
+  background: var(--red-bg);
+  color: var(--red);
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 10px 12px;
+  font-size: 12px;
+  z-index: 10;
+}
+
+.cq-device-bubble p {
+  margin: 0 0 8px;
+}
+
+.cq-device-bubble-arrow {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  background: var(--red-bg);
+  border-right: 1px solid var(--red);
+  border-bottom: 1px solid var(--red);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.cq-device-bubble-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cq-device-bubble-retry {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.cq-device-bubble-dismiss {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--red);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cq-error-banner {
+  padding: 8px 12px;
+  margin: 0 0 8px;
+  background: var(--red-bg);
+  color: var(--red);
+}

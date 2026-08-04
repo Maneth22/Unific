@@ -143,3 +143,200 @@ input, select, textarea {
 .badge-id { background: var(--blue-bg); color: var(--blue); }
 .badge-pending { background: var(--amber-bg); color: var(--amber); }
 .badge-alert { background: var(--red-bg); color: var(--red); }
+
+/* ---------------------------------------------------------------------
+   Responsive app shell (collapsible sidebar + mobile drawer)
+
+   Breakpoints — keep these numbers in sync with
+   src/layouts/shared/breakpoints.js (JS needs the same numbers for
+   matchMedia; @media query bounds can't consume CSS custom properties):
+     mobile:  max-width: 767px
+     tablet:  768px – 1023px
+     desktop: min-width: 1024px
+--------------------------------------------------------------------- */
+:root {
+  --sidebar-width: 220px;
+  --sidebar-tab-width: 28px;
+  --topbar-height: 52px;
+  --space-main-padding: 28px;
+  --space-main-padding-sm: 16px;
+  --transition-fast: 200ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --transition-fast: 0ms; }
+}
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.app-sidebar {
+  width: var(--sidebar-width);
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  padding: 18px 12px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: width var(--transition-fast) ease;
+}
+
+.app-sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.app-sidebar-brand,
+.app-sidebar-footer,
+.app-sidebar-nav {
+  white-space: nowrap;
+  opacity: 1;
+  transition: opacity var(--transition-fast) ease;
+}
+
+.app-sidebar-footer {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  font-size: 12px;
+}
+
+/* Collapsed slim-tab state (desktop manual collapse, tablet auto-collapse) */
+.app-sidebar--collapsed {
+  width: var(--sidebar-tab-width);
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.app-sidebar--collapsed .app-sidebar-brand,
+.app-sidebar--collapsed .app-sidebar-footer,
+.app-sidebar--collapsed .app-sidebar-nav {
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  left: -9999px;
+}
+
+.app-sidebar-tab {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  width: 24px;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 8px 0 0 8px;
+  background: var(--surface);
+  color: var(--sub);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-main {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-main-padding);
+  min-width: 0;
+}
+
+.app-topbar {
+  display: none;
+}
+
+.app-overlay {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .app-topbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: var(--topbar-height);
+    padding: 0 12px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  .app-hamburger,
+  .app-sidebar-close {
+    min-width: 44px;
+    min-height: 44px;
+    border: none;
+    background: none;
+    font-size: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .app-sidebar-close {
+    align-self: flex-end;
+  }
+
+  .app-sidebar--drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 100%;
+    max-width: 320px;
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform var(--transition-fast) ease;
+    padding: 18px 16px;
+  }
+
+  .app-sidebar--drawer.app-sidebar--open {
+    transform: translateX(0);
+  }
+
+  .app-sidebar--drawer .app-sidebar-tab {
+    display: none;
+  }
+
+  .app-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 30;
+  }
+
+  .app-main {
+    padding: var(--space-main-padding-sm);
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .app-main {
+    padding: var(--space-main-padding-sm);
+  }
+}
+
+/* Master-detail split (e.g. ProfilesRoomHome) — stack list above detail
+   below desktop width instead of squeezing the fixed-width list column. */
+@media (max-width: 1023px) {
+  .master-detail {
+    flex-direction: column !important;
+  }
+
+  .master-detail-list {
+    width: 100% !important;
+  }
+}
