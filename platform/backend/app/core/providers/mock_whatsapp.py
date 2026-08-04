@@ -23,6 +23,21 @@ class MockWhatsAppProvider(WhatsAppProvider):
         self.sent.append({"to": to_phone, "text": text, "id": message_id})
         return message_id
 
+    async def send_template(self, to_phone: str, template_name: str, params: dict) -> str:
+        if random.random() < self.failure_rate:
+            raise ProviderError("Simulated WhatsApp rate-limit/timeout")
+        message_id = f"mock-template-{uuid.uuid4()}"
+        self.sent.append({"to": to_phone, "template_name": template_name, "params": params, "id": message_id})
+        return message_id
+
+    async def get_webhook_configuration(self) -> dict:
+        return {
+            "configured": True,
+            "callback_url": "http://localhost:8000/api/meeting-room/webhook",
+            "fields": ["messages"],
+            "active": True,
+        }
+
     def parse_webhook(self, payload: dict) -> list[InboundWhatsAppMessage]:
         """Dev webhook shape: {"from": "+91...", "text": "...", "id": "..."}"""
         return [

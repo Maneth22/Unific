@@ -33,3 +33,9 @@ export const getCostTimeseries = (bucket = 'day', groupBy = 'model') =>
 export const getUsageByClientNeed = () => apiClient.get('/accounts/ai-usage/by-client-need').then((r) => r.data)
 export const getFinancialTimeseries = (bucket = 'day') =>
   apiClient.get('/accounts/financial-timeseries', { params: { bucket } }).then((r) => r.data)
+
+// --- WhatsApp Diagnostics ---
+export const whatsAppTestSend = (payload) => apiClient.post('/accounts/whatsapp/test-send', payload).then((r) => r.data)
+export const getWhatsAppWebhookStatus = () => apiClient.get('/accounts/whatsapp/webhook-status').then((r) => r.data)
+export const getWhatsAppWebhookLog = (limit = 50) =>
+  apiClient.get('/accounts/whatsapp/webhook-log', { params: { limit } }).then((r) => r.data)

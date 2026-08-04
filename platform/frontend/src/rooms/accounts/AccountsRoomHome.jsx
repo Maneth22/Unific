@@ -6,6 +6,7 @@ import ApiMonitorPanel from './ApiMonitorPanel'
 import CalendarView from './CalendarView'
 import ArchiveLocker from './ArchiveLocker'
 import AiUsagePanel from './AiUsagePanel'
+import WhatsAppDiagnosticsPanel from './WhatsAppDiagnosticsPanel'
 
 const TABS = [
   { key: 'dashboard', label: 'Dashboard', Component: CostDashboardTab },
@@ -13,6 +14,7 @@ const TABS = [
   { key: 'financial', label: 'Financial Dashboard', Component: FinancialDashboard },
   { key: 'ai-usage', label: 'AI Usage', Component: AiUsagePanel },
   { key: 'api-monitor', label: 'API Monitor', Component: ApiMonitorPanel },
+  { key: 'whatsapp', label: 'WhatsApp Diagnostics', Component: WhatsAppDiagnosticsPanel },
   { key: 'calendar', label: 'Calendar', Component: CalendarView },
   { key: 'archive', label: 'Archive Locker', Component: ArchiveLocker },
 ]

@@ -44,8 +44,28 @@ class WhatsAppProvider(ABC):
         """Returns a provider-assigned message id."""
 
     @abstractmethod
+    async def send_template(self, to_phone: str, template_name: str, params: dict) -> str:
+        """Sends a pre-approved WhatsApp template message. Returns a
+        provider-assigned message id. Separate from `send_message` because
+        the Cloud API's template-send call is a structurally different
+        request (named template + positional/component params, not a
+        freeform body) — see `app.accounts.whatsapp_service.test_send`,
+        the one caller allowed to reach an arbitrary/unlinked number."""
+
+    @abstractmethod
     def parse_webhook(self, payload: dict) -> list[InboundWhatsAppMessage]:
         """Parses a raw inbound webhook payload into normalized messages."""
+
+    @abstractmethod
+    async def get_webhook_configuration(self) -> dict:
+        """Returns what the provider (Meta) currently has on file for this
+        app's webhook: `{"configured": bool, "callback_url": str | None,
+        "fields": list[str], "active": bool}`. Lets staff confirm from
+        inside the app that the callback URL/subscribed fields Meta has on
+        file actually match what's expected, without the Meta dashboard.
+        Raises `ProviderError` if the check itself can't be made (e.g. the
+        app-level credentials needed for the `/subscriptions` lookup
+        aren't configured) — callers must not treat that as a crash."""
 
 
 class TranslationProvider(ABC):

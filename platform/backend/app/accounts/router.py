@@ -14,14 +14,15 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.accounts import schemas, services
+from app.accounts import schemas, services, whatsapp_service
 from app.accounts.models import AccountCategory, ApiHealthStatus, FinancialRecordCategory
 from app.core.models.archive import ArchiveShelf
 from app.core.models.audit import ActorType
 from app.core.models.common import RoomName
 from app.core.models.staff import StaffUser
+from app.core.providers.factory import get_whatsapp_provider
 from app.core.security.dependencies import client_ip, require_admin
-from app.core.services import archive_service, calendar_service, llm_usage_service
+from app.core.services import archive_service, calendar_service, llm_usage_service, webhook_log_service
 from app.database import get_db
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
@@ -321,3 +322,55 @@ async def financial_timeseries(
     grouped by category — the non-LLM half of the same landing-dashboard
     chart."""
     return await services.financial_record_timeseries(db, bucket=bucket)
+
+
+# --- WhatsApp Diagnostics ---
+# A separate, staff-only tool for validating the WhatsApp integration
+# itself — not part of the Meeting Room's per-identity conversation flow.
+# See app.accounts.whatsapp_service for why this isn't gated by
+# gate_service.check_and_charge.
+
+@router.post("/whatsapp/test-send", response_model=schemas.WhatsAppTestSendOut)
+async def whatsapp_test_send(
+    req: schemas.WhatsAppTestSendRequest, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)
+):
+    try:
+        result = await whatsapp_service.test_send(
+            db,
+            staff_id=staff.id,
+            to_number=req.to_number,
+            message_type=req.message_type,
+            text=req.text,
+            template_name=req.template_name,
+            template_params=req.template_params,
+            whatsapp_provider=get_whatsapp_provider(),
+        )
+    except whatsapp_service.WhatsAppDiagnosticsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@router.get("/whatsapp/webhook-status", response_model=schemas.WhatsAppWebhookStatusOut)
+async def whatsapp_webhook_status(staff: StaffUser = Depends(admin)):
+    return await whatsapp_service.get_webhook_status(get_whatsapp_provider())
+
+
+@router.get("/whatsapp/webhook-log", response_model=list[schemas.WebhookLogOut])
+async def whatsapp_webhook_log(
+    limit: int = 50, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)
+):
+    limit = max(1, min(limit, 200))
+    rows = await webhook_log_service.list_recent(db, limit=limit)
+    return [
+        schemas.WebhookLogOut(
+            id=row.id,
+            room=row.room.value,
+            provider=row.provider,
+            direction=row.direction.value,
+            raw_payload=row.raw_payload,
+            status=row.status,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]

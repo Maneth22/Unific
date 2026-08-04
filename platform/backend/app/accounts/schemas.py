@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -219,3 +220,39 @@ class FinancialTimeseriesRow(BaseModel):
     period: datetime
     category: str
     total_amount: Decimal
+
+
+# --- WhatsApp Diagnostics ---
+
+class WhatsAppTestSendRequest(BaseModel):
+    to_number: str
+    message_type: Literal["text", "template"]
+    text: str | None = None
+    template_name: str | None = None
+    template_params: dict = Field(default_factory=dict)
+
+
+class WhatsAppTestSendOut(BaseModel):
+    success: bool
+    provider_message_id: str | None
+    error: str | None
+
+
+class WhatsAppWebhookStatusOut(BaseModel):
+    configured: bool
+    callback_url: str | None
+    fields: list[str]
+    active: bool
+    expected_callback_url: str
+    matches: bool
+    error: str | None
+
+
+class WebhookLogOut(BaseModel):
+    id: str
+    room: str
+    provider: str
+    direction: str
+    raw_payload: dict
+    status: str
+    created_at: datetime

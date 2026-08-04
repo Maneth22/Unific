@@ -6,6 +6,7 @@ from app.core.services import (
     llm_usage_service,
     scope_service,
     spend_service,
+    webhook_log_service,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "llm_usage_service",
     "scope_service",
     "spend_service",
+    "webhook_log_service",
 ]

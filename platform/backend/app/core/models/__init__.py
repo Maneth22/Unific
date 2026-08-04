@@ -7,6 +7,7 @@ from app.core.models.ledger import LedgerEntry, LedgerEntryType
 from app.core.models.llm_usage import LlmUsageRecord
 from app.core.models.room_account import AgentSubAccount, RoomAccount
 from app.core.models.staff import LoginAttempt, RefreshToken, StaffCategory, StaffTier, StaffUser
+from app.core.models.webhook_log import WebhookDirection, WebhookLog
 
 __all__ = [
     "ArchiveItem",
@@ -29,4 +30,6 @@ __all__ = [
     "StaffCategory",
     "StaffTier",
     "StaffUser",
+    "WebhookDirection",
+    "WebhookLog",
 ]

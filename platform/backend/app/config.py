@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     whatsapp_cloud_api_token: str = ""
     whatsapp_cloud_api_phone_number_id: str = ""
     whatsapp_cloud_api_verify_token: str = ""
+    # App-level credentials — only needed for the WhatsApp Diagnostics
+    # panel's webhook-status check, which reads Meta's `/subscriptions`
+    # edge (a per-app resource, not per-phone-number). Sending/receiving
+    # messages works fine with the three fields above alone.
+    whatsapp_cloud_api_app_id: str = ""
+    whatsapp_cloud_api_app_secret: str = ""
 
     # The dialable agent number (digits, with country code, no "+") used
     # to build `wa.me` click-to-chat deep links after public member
@@ -67,6 +73,11 @@ class Settings(BaseSettings):
     # default) or generated invite links point at a port nothing is
     # listening on.
     frontend_base_url: str = "http://localhost:5183"
+
+    # This backend's own public origin — used to compute the webhook URL
+    # Meta *should* have on file, for the WhatsApp Diagnostics panel's
+    # webhook-status check (see `whatsapp_cloud_api_app_id` above).
+    backend_base_url: str = "http://localhost:8000"
 
     # Gemini — backs REPLY_PROVIDER=gemini / TRANSLATION_PROVIDER=gemini.
     # gemini-flash-lite is the same cheap-model choice the prototype made,

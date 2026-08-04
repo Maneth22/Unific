@@ -6,7 +6,7 @@ happens, so an unlinked phone number is bounced immediately.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,10 +17,12 @@ from app.core.models.audit import ActorType
 from app.core.models.client import ClientUser
 from app.core.models.common import RoomName
 from app.core.models.staff import StaffUser
+from app.core.models.webhook_log import WebhookDirection
 from app.core.providers.base import ProviderError
+from app.core.providers.cloud_api_whatsapp import verify_handshake
 from app.core.providers.factory import get_comms_agent, get_reply_generator, get_video_provider, get_whatsapp_provider
 from app.core.security.dependencies import require_admin, require_any_staff
-from app.core.services import archive_service, scope_service
+from app.core.services import archive_service, scope_service, webhook_log_service
 from app.database import get_db
 from app.meeting_room import schemas, services
 from app.meeting_room.models import Conversation, ReportType, WhatsAppLink
@@ -33,33 +35,84 @@ router = APIRouter(prefix="/api/meeting-room", tags=["meeting_room"])
 
 admin = require_admin
 
+WHATSAPP_PROVIDER_LOG_NAME = "whatsapp_cloud_api"
+
 
 # --- Inbound webhook (no staff/client auth — the external channel) ---
 
+@router.get("/webhook")
+async def verify_webhook(
+    hub_mode: str | None = Query(default=None, alias="hub.mode"),
+    hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
+    hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
+):
+    """Meta's one-time subscription-verification handshake, run whenever
+    the webhook URL is (re)entered in the App Dashboard. Separate route
+    from the POST event handler below — GET is verification, POST is
+    events, and the two are never the same request."""
+    challenge = verify_handshake(hub_mode, hub_verify_token, hub_challenge)
+    if challenge is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Webhook verification failed")
+    return Response(content=challenge, media_type="text/plain", status_code=status.HTTP_200_OK)
+
+
 @router.post("/webhook")
 async def inbound_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    """Every field here is untrusted input straight off the wire (see
+    `docs/ARCHITECTURE.md`'s security boundaries) — `CloudAPIWhatsAppProvider.
+    parse_webhook` validates shape before use, and `receive_inbound_message`
+    bounces any phone number that doesn't resolve to a known, linked
+    identity before it ever reaches `gate_service.check_and_charge`. The
+    raw payload is logged to `core.webhook_log` unconditionally — even a
+    malformed payload or an unhandled downstream error still gets a row,
+    which is the whole point: it's what makes debugging real Meta traffic
+    possible without SSH-ing into the server to read logs."""
     payload = await request.json()
-    whatsapp_provider = get_whatsapp_provider()
-    comms_agent = get_comms_agent()
-    reply_generator = get_reply_generator()
+    status_note = "received"
+    results: list[dict] = []
+    error: Exception | None = None
 
-    parsed = whatsapp_provider.parse_webhook(payload)
-    results = []
-    for inbound in parsed:
-        try:
-            message = await services.receive_inbound_message(
-                db,
-                from_phone=inbound.from_phone,
-                text=inbound.text,
-                provider_message_id=inbound.provider_message_id,
-                comms_agent=comms_agent,
-                reply_generator=reply_generator,
-                whatsapp_provider=whatsapp_provider,
-            )
-            results.append({"status": "processed", "message_id": message.id})
-        except services.Bounced as exc:
-            results.append({"status": "bounced", "reason": exc.reason})
+    try:
+        if not isinstance(payload, dict) or payload.get("object") != "whatsapp_business_account":
+            status_note = "invalid_object"
+        else:
+            whatsapp_provider = get_whatsapp_provider()
+            comms_agent = get_comms_agent()
+            reply_generator = get_reply_generator()
+
+            parsed = whatsapp_provider.parse_webhook(payload)
+            for inbound in parsed:
+                try:
+                    message = await services.receive_inbound_message(
+                        db,
+                        from_phone=inbound.from_phone,
+                        text=inbound.text,
+                        provider_message_id=inbound.provider_message_id,
+                        comms_agent=comms_agent,
+                        reply_generator=reply_generator,
+                        whatsapp_provider=whatsapp_provider,
+                    )
+                    results.append({"status": "processed", "message_id": message.id})
+                except services.Bounced as exc:
+                    results.append({"status": "bounced", "reason": exc.reason})
+            status_note = "processed" if results else "no_messages"
+    except Exception as exc:  # noqa: BLE001 — the raw payload must still be logged below, then this re-raises
+        error = exc
+        status_note = f"error:{exc}"
+        await db.rollback()  # clear the aborted transaction so the log write below can proceed
+
+    await webhook_log_service.record(
+        db,
+        room=RoomName.meeting_room,
+        provider=WHATSAPP_PROVIDER_LOG_NAME,
+        direction=WebhookDirection.inbound,
+        raw_payload=payload if isinstance(payload, dict) else {"raw": payload},
+        status=status_note,
+    )
     await db.commit()
+
+    if error is not None:
+        raise error
     return {"results": results}
 
 
