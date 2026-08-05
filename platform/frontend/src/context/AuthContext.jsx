@@ -1,12 +1,20 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { staffLogin, staffLogout, staffRefresh, staffBootstrap } from '../api/auth'
 import { setAccessToken, setRefreshEndpoint, setUnauthorizedHandler } from '../api/client'
+import useIdleLogout, { IDLE_TIMEOUT_MS } from '../hooks/useIdleLogout'
 
 const AuthContext = createContext(null)
 
 export function AuthProvider({ children }) {
   const [staff, setStaff] = useState(null)
   const [loading, setLoading] = useState(true)
+  // Only set when the initial silent-refresh below fails with a genuine
+  // network error (no response at all — backend unreachable), never for a
+  // normal 401 ("no valid session yet", the expected case for a first-time
+  // visitor). See App.jsx's StaffAreaGate, which renders ConnectionLostPage
+  // instead of the dashboard/login flow when this is true.
+  const [connectionError, setConnectionError] = useState(false)
 
   const clearAuth = useCallback(() => {
     setAccessToken(null)
@@ -24,9 +32,10 @@ export function AuthProvider({ children }) {
         setAccessToken(data.access_token)
         setStaff(data.staff)
       })
-      .catch(() => {
+      .catch((err) => {
         setAccessToken(null)
         setStaff(null)
+        if (!err.response) setConnectionError(true)
       })
       .finally(() => setLoading(false))
   }, [clearAuth])
@@ -60,10 +69,21 @@ export function AuthProvider({ children }) {
     return data
   }, [])
 
+  // Security: auto sign-out after IDLE_TIMEOUT_MS of no mouse/keyboard/
+  // touch/scroll activity, redirecting to the staff login with a reason
+  // flag so it can show a "signed out due to inactivity" banner.
+  const navigate = useNavigate()
+  const handleIdle = useCallback(() => {
+    logout()
+    navigate('/support/login?reason=idle', { replace: true })
+  }, [logout, navigate])
+  useIdleLogout(!!staff, IDLE_TIMEOUT_MS, handleIdle)
+
   const value = useMemo(
     () => ({
       staff,
       loading,
+      connectionError,
       isAuthenticated: !!staff,
       isAdmin: staff?.tier === 'admin',
       login,
@@ -71,7 +91,7 @@ export function AuthProvider({ children }) {
       logout,
       refreshStaff,
     }),
-    [staff, loading, login, bootstrap, logout, refreshStaff]
+    [staff, loading, connectionError, login, bootstrap, logout, refreshStaff]
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

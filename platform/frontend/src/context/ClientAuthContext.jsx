@@ -1,7 +1,9 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { clientLogin, clientLogout, clientRefresh } from '../api/clientAuth'
 import { clientStaffLogin, clientStaffLogout, clientStaffRefresh } from '../api/clientStaffAuth'
 import { setAccessToken, setRefreshEndpoint, setUnauthorizedHandler } from '../api/client'
+import useIdleLogout, { IDLE_TIMEOUT_MS } from '../hooks/useIdleLogout'
 
 const ClientAuthContext = createContext(null)
 
@@ -18,6 +20,13 @@ export function ClientAuthProvider({ children }) {
   const [clientUser, setClientUser] = useState(null)
   const [actorType, setActorType] = useState(null) // 'owner' | 'staff'
   const [loading, setLoading] = useState(true)
+  // Only set when BOTH the owner and client-staff silent-refresh attempts
+  // below ultimately fail to authenticate AND at least one of those
+  // failures was a genuine network error (no response) rather than a
+  // normal 401 — a plain "no valid session" case (the expected outcome for
+  // a first-time visitor) must never trip this. See App.jsx's
+  // ClientAreaGate.
+  const [connectionError, setConnectionError] = useState(false)
 
   const clearAuth = useCallback(() => {
     setAccessToken(null)
@@ -29,6 +38,7 @@ export function ClientAuthProvider({ children }) {
     setUnauthorizedHandler(clearAuth)
 
     async function silentRefresh() {
+      let sawNetworkError = false
       try {
         const data = await clientRefresh()
         setRefreshEndpoint('/profiles/client/refresh')
@@ -36,8 +46,9 @@ export function ClientAuthProvider({ children }) {
         setClientUser(data.client)
         setActorType('owner')
         return
-      } catch {
+      } catch (err) {
         // Not an owner session (or none) — try the client-staff cookie.
+        if (!err.response) sawNetworkError = true
       }
       try {
         const data = await clientStaffRefresh()
@@ -45,10 +56,12 @@ export function ClientAuthProvider({ children }) {
         setAccessToken(data.access_token)
         setClientUser(data.client_staff)
         setActorType('staff')
-      } catch {
+      } catch (err) {
+        if (!err.response) sawNetworkError = true
         setAccessToken(null)
         setClientUser(null)
         setActorType(null)
+        if (sawNetworkError) setConnectionError(true)
       }
     }
 
@@ -84,17 +97,28 @@ export function ClientAuthProvider({ children }) {
     }
   }, [actorType, clearAuth])
 
+  // Security: auto sign-out after IDLE_TIMEOUT_MS of no mouse/keyboard/
+  // touch/scroll activity, redirecting to the client login with a reason
+  // flag so it can show a "signed out due to inactivity" banner.
+  const navigate = useNavigate()
+  const handleIdle = useCallback(() => {
+    logout()
+    navigate('/login?reason=idle', { replace: true })
+  }, [logout, navigate])
+  useIdleLogout(!!clientUser, IDLE_TIMEOUT_MS, handleIdle)
+
   const value = useMemo(
     () => ({
       clientUser,
       actorType,
       isOwner: actorType === 'owner',
       loading,
+      connectionError,
       isAuthenticated: !!clientUser,
       login,
       logout,
     }),
-    [clientUser, actorType, loading, login, logout]
+    [clientUser, actorType, loading, connectionError, login, logout]
   )
 
   return <ClientAuthContext.Provider value={value}>{children}</ClientAuthContext.Provider>

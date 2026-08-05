@@ -1,10 +1,12 @@
 import React, { useState } from 'react'
-import { Link, Navigate, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 import { useClientAuth } from '../context/ClientAuthContext'
 
 export default function ClientLoginPage() {
   const { isAuthenticated, login } = useClientAuth()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const idleSignOut = searchParams.get('reason') === 'idle'
   const [actorType, setActorType] = useState('owner')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -67,6 +69,12 @@ export default function ClientLoginPage() {
           onChange={(e) => setPassword(e.target.value)}
           style={{ width: '100%', padding: '8px 10px', marginBottom: 16, border: '1px solid var(--line)', borderRadius: 8 }}
         />
+
+        {!error && idleSignOut && (
+          <div className="badge badge-pending" style={{ display: 'block', marginBottom: 14 }}>
+            You were signed out due to inactivity.
+          </div>
+        )}
 
         {error && <div className="badge badge-alert" style={{ display: 'block', marginBottom: 14 }}>{error}</div>}
 

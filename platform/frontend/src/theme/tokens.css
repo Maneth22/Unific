@@ -340,3 +340,275 @@ input, select, textarea {
     width: 100% !important;
   }
 }
+
+/* ---------------------------------------------------------------------
+   Public marketing site (landing / about / contact). Reuses the app's
+   existing tokens (--token, --slate, --surface, --ink, --sub, --line,
+   --radius, --shadow) rather than a separate palette, so the public site
+   and the authenticated app read as one product. Breakpoint matches
+   BREAKPOINTS.mobile in src/layouts/shared/breakpoints.js (767px).
+--------------------------------------------------------------------- */
+.public-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 14px 28px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.public-nav-brand {
+  font-weight: 800;
+  font-size: 16px;
+  text-decoration: none;
+  color: var(--ink);
+}
+
+.public-nav-links {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-left: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.public-nav-links a {
+  color: var(--sub);
+  text-decoration: none;
+}
+
+.public-nav-links a:hover {
+  color: var(--ink);
+}
+
+.public-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+}
+
+.public-nav-supporter-link {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sub);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.public-nav-supporter-link:hover {
+  color: var(--token);
+}
+
+.public-hamburger {
+  display: none;
+  min-width: 44px;
+  min-height: 44px;
+  border: none;
+  background: none;
+  font-size: 20px;
+  align-items: center;
+  justify-content: center;
+}
+
+.public-mobile-menu {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  .public-nav-links {
+    display: none;
+  }
+
+  .public-hamburger {
+    display: flex;
+  }
+
+  .public-mobile-menu.public-mobile-menu--open {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 16px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .public-mobile-menu a {
+    padding: 10px 4px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+    text-decoration: none;
+    border-radius: 8px;
+  }
+
+  .public-mobile-menu a:hover {
+    background: var(--neutral-bg);
+  }
+}
+
+.public-main {
+  background: var(--bg);
+}
+
+.public-hero {
+  padding: 72px 28px;
+  text-align: center;
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.public-hero h1 {
+  font-size: clamp(28px, 4vw, 42px);
+  line-height: 1.15;
+  margin: 0 0 16px;
+}
+
+.public-hero p {
+  color: var(--sub);
+  font-size: 16px;
+  line-height: 1.6;
+  margin: 0 0 28px;
+}
+
+.public-hero-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.public-section {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 56px 28px;
+}
+
+.public-section-alt {
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.public-section h2 {
+  font-size: clamp(22px, 3vw, 28px);
+  margin: 0 0 12px;
+}
+
+.public-section-lead {
+  color: var(--sub);
+  font-size: 15px;
+  line-height: 1.6;
+  max-width: 640px;
+  margin: 0 0 32px;
+}
+
+.public-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px;
+}
+
+.public-feature-card {
+  padding: 22px;
+}
+
+.public-feature-card h3 {
+  font-size: 15px;
+  margin: 0 0 8px;
+}
+
+.public-feature-card p {
+  color: var(--sub);
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.public-cta-band {
+  background: var(--token-bg);
+  text-align: center;
+  padding: 48px 28px;
+}
+
+.public-cta-band h2 {
+  margin: 0 0 20px;
+}
+
+.public-footer {
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  padding: 32px 28px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--sub);
+}
+
+.public-footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.public-footer-links a {
+  color: var(--sub);
+  text-decoration: none;
+}
+
+.public-footer-links a:hover {
+  color: var(--ink);
+}
+
+/* Shared visual family for the error-page pages (ConnectionLostPage,
+   PermissionDeniedPage, ErrorPage, NotFoundPage). */
+.error-page-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.error-page-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 32px 28px;
+  text-align: center;
+}
+
+.error-page-icon {
+  margin: 0 auto 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.error-page-card h1 {
+  font-size: 19px;
+  margin: 0 0 8px;
+}
+
+.error-page-card p {
+  color: var(--sub);
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0 0 22px;
+}
+
+.error-page-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}

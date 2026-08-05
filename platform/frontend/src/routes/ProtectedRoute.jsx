@@ -8,7 +8,7 @@ export default function ProtectedRoute() {
 
   if (loading) return null
   if (!isAuthenticated) {
-    return <Navigate to="/login" state={{ from: location }} replace />
+    return <Navigate to="/support/login" state={{ from: location }} replace />
   }
   return <Outlet />
 }

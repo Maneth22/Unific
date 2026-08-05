@@ -15,7 +15,7 @@ export default function ScopeRoute() {
 
   if (loading) return null
   if (!isAuthenticated) {
-    return <Navigate to="/client/login" state={{ from: location }} replace />
+    return <Navigate to="/login" state={{ from: location }} replace />
   }
   return <Outlet />
 }
