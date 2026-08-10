@@ -39,11 +39,24 @@
 }
 
 .cq-call-shell {
+  position: relative;
   width: 100%;
   height: 100%;
   border-radius: var(--radius);
   overflow: hidden;
   background: var(--bg);
+}
+
+/* One small corner badge standing in for however many translator bots
+   (see live_translation.py, up to 4) are actually in the room — see
+   TranslationIndicator.jsx. Positioned against .cq-call-shell so it stays
+   pinned to the video area regardless of grid/focus layout underneath. */
+.cq-translation-indicator {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 5;
+  pointer-events: none;
 }
 
 /* Square-ish tiles, capped so a tile can never outgrow this box (the actual

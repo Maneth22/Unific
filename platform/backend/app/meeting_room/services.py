@@ -24,6 +24,7 @@ from app.core.models.common import RoomName, utcnow, uuid_str
 from app.core.providers.base import CommsAgent, ProviderError, ReplyGenerator, VideoProvider, WhatsAppProvider
 from app.core.providers.stub_reply_generator import FALLBACK_REPLY
 from app.core.services import archive_service, audit_service, calendar_service, gate_service, spend_service
+from app.meeting_room import live_translation
 from app.meeting_room.models import (
     Conversation,
     ConversationStatus,
@@ -739,6 +740,14 @@ async def _mark_joined(
     if meeting.status == MeetingStatus.scheduled:
         meeting.status = MeetingStatus.live
         meeting.started_at = now
+        if meeting.translate_live:
+            # Best-effort, same philosophy as the LiveKit room calls below —
+            # a translation-agent startup failure shouldn't block the first
+            # participant from actually joining the call.
+            try:
+                await live_translation.start_for_meeting(room_name=meeting.room_name, meeting_id=meeting.id)
+            except Exception:
+                logger.exception("failed to start live translation meeting_id=%s", meeting.id)
     await audit_service.record(
         db,
         actor_type=actor_type,
@@ -871,6 +880,10 @@ async def end_meeting(
         # Best-effort: our own record of "this meeting is over" shouldn't
         # hinge on the provider's disconnect call succeeding.
         logger.warning("LiveKit room end failed (marking meeting completed regardless): %s", exc)
+    try:
+        await live_translation.stop_for_meeting(meeting.id)
+    except Exception:
+        logger.exception("failed to stop live translation meeting_id=%s", meeting.id)
 
     meeting.status = MeetingStatus.completed
     meeting.ended_at = utcnow()
@@ -905,6 +918,10 @@ async def delete_meeting(db: AsyncSession, *, meeting_id: str, staff_id: str, vi
         # Best-effort, same as end_meeting: deletion must not hinge on the
         # provider call succeeding, but we still want to have tried.
         logger.warning("LiveKit room deletion failed (deleting the meeting record regardless): %s", exc)
+    try:
+        await live_translation.stop_for_meeting(meeting.id)
+    except Exception:
+        logger.exception("failed to stop live translation meeting_id=%s", meeting.id)
 
     await audit_service.record(
         db,

@@ -111,9 +111,22 @@ class Settings(BaseSettings):
     meeting_invite_ttl_hours: int = 6
     meeting_token_ttl_minutes: int = 180
 
+    # Live audio translation (LiveKit + Gemini Live) — backs
+    # scripts/translation_agent.py. Auth reuses gemini_api_key above
+    # (google-genai's Client(api_key=...) doesn't care which env var the
+    # key came from); no separate GOOGLE_API_KEY is defined.
+    live_translation_model: str = "gemini-3.5-live-translate-preview"
+    live_translation_bot_identity_prefix: str = "translator"
+    live_translation_default_target_language: str = "en"
+    live_translation_allowed_languages: str = "en,hi,ta,si"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def live_translation_allowed_language_list(self) -> list[str]:
+        return [l.strip() for l in self.live_translation_allowed_languages.split(",") if l.strip()]
 
     @property
     def is_production(self) -> bool:

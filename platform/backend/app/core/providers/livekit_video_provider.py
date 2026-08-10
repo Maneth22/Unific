@@ -44,6 +44,12 @@ class LiveKitVideoProvider(VideoProvider):
                     can_publish=True,
                     can_subscribe=True,
                     can_publish_data=True,
+                    # Lets the frontend broadcast the participant's spoken/
+                    # listening language via localParticipant.setAttributes
+                    # ({language: ...}) — read by live_translation.py's
+                    # per-speaker skip logic and by SelectiveAudioRenderer
+                    # on other participants' clients.
+                    can_update_own_metadata=True,
                 )
             )
             .with_ttl(timedelta(seconds=ttl_seconds))

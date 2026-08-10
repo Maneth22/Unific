@@ -4,7 +4,7 @@ import '@livekit/components-styles'
 import './video-call.css'
 import CallLayout from './CallLayout'
 import { useDeviceErrorState } from './DeviceErrorBubble'
-import { DEVICE_ERROR_NAMES } from './callConstants'
+import { DEVICE_ERROR_NAMES, MIC_CAPTURE_OPTIONS } from './callConstants'
 
 // Shared by every join surface (staff dashboard, staff portal, client
 // dashboard, and the public passwordless invite page) — one component, four
@@ -61,7 +61,7 @@ export default function VideoCallRoom({ serverUrl, token, onDisconnected }) {
       token={token}
       connect
       video
-      audio
+      audio={MIC_CAPTURE_OPTIONS}
       className="cq-call-room"
       // @livekit/components-styles' entire default theme (colors, spacing,
       // and layout-critical vars like --lk-control-bar-height/--lk-grid-gap)
