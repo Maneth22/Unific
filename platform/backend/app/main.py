@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.accounts.router import router as accounts_router
+from app.accounts.whatsapp_router import router as whatsapp_router
 from app.auth.router import router as staff_auth_router
 from app.config import settings
 from app.core.providers.factory import get_video_provider
@@ -50,6 +51,7 @@ app.add_middleware(
 
 app.include_router(staff_auth_router)
 app.include_router(accounts_router)
+app.include_router(whatsapp_router)
 app.include_router(profiles_router)
 app.include_router(profiles_client_router)
 app.include_router(profiles_client_staff_router)

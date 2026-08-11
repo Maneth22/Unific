@@ -15,7 +15,7 @@ import secrets
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.models.audit import ActorType
@@ -360,6 +360,48 @@ async def move_subtree(db: AsyncSession, identity_id: str, new_parent_id: str, s
         entity_type="identity",
         entity_id=identity_id,
         after={"new_parent_id": new_parent_id},
+    )
+    return identity
+
+
+async def deactivate_identity(
+    db: AsyncSession, *, identity_id: str, actor_type: ActorType, actor_id: str | None
+) -> Identity:
+    """Soft-deletes an identity and everything under it — a group takes
+    every member/sub-group with it in one step, a member (always a leaf)
+    just itself. Never a hard delete: `parent_id` is `ON DELETE RESTRICT`
+    (a non-leaf identity can't be hard-deleted without removing its
+    descendants first anyway), and a hard delete would destroy
+    `ProfileAccount` balances with no ledger trace and wipe `ConsentRecord`
+    history — exactly backwards for a "right to be forgotten" style
+    action. Everything else (balances, consent history, WhatsApp link,
+    conversation history) is preserved untouched — only `is_active` flips."""
+    identity = await db.get(Identity, identity_id)
+    if identity is None:
+        raise ProfilesError("Identity not found")
+    if not identity.is_active:
+        raise ProfilesError("This identity has already been deleted")
+
+    ids = await scope_service.descendant_ids(db, identity_id, include_self=True)
+    await db.execute(update(Identity).where(Identity.id.in_(ids)).values(is_active=False))
+    identity.is_active = False  # keep the already-loaded object in sync with the bulk update above
+
+    if identity.id_type == IdentityType.group:
+        current_invite = await get_active_invite(db, identity_id)
+        if current_invite is not None:
+            current_invite.is_active = False
+
+    await db.flush()
+    await audit_service.record(
+        db,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        action="profiles.identity.deactivate",
+        room=RoomName.profiles,
+        entity_type="identity",
+        entity_id=identity_id,
+        before={"is_active": True},
+        after={"is_active": False, "cascaded_count": len(ids)},
     )
     return identity
 
@@ -787,7 +829,7 @@ async def list_members(db: AsyncSession, group_id: str) -> list[Identity]:
     so this is a parent_id filter, not a descendant-tree walk."""
     result = await db.execute(
         select(Identity)
-        .where(Identity.parent_id == group_id, Identity.id_type == IdentityType.member)
+        .where(Identity.parent_id == group_id, Identity.id_type == IdentityType.member, Identity.is_active.is_(True))
         .order_by(Identity.created_at)
     )
     return list(result.scalars().all())
@@ -802,7 +844,7 @@ async def list_client_groups(db: AsyncSession, client_identity_id: str) -> list[
         return []
     result = await db.execute(
         select(Identity)
-        .where(Identity.id.in_(ids), Identity.id_type == IdentityType.group)
+        .where(Identity.id.in_(ids), Identity.id_type == IdentityType.group, Identity.is_active.is_(True))
         .order_by(Identity.path)
     )
     return list(result.scalars().all())

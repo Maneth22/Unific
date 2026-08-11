@@ -111,6 +111,39 @@ async def test_send(
     return {"success": success, "provider_message_id": provider_message_id, "error": error_detail}
 
 
+async def send_text(db: AsyncSession, *, to: str, message: str, whatsapp_provider: WhatsAppProvider) -> dict:
+    """General-purpose "send one WhatsApp text message" — backs
+    POST /api/whatsapp/send. Deliberately thinner than test_send() above:
+    no audit row, no operational-spend record (this isn't an Accounts-room
+    diagnostic with a cost to bill; test_send already covers that use
+    case), but still writes the same outbound webhook_log row every other
+    send site in this codebase writes, so the message stays traceable in
+    the existing WhatsApp webhook log viewer regardless of which endpoint
+    sent it. Never includes the access token — only to/message/result ever
+    reach the log row, matching CloudAPIWhatsAppProvider's own behavior of
+    never logging its token."""
+    provider_message_id: str | None = None
+    error_detail: str | None = None
+    try:
+        provider_message_id = await whatsapp_provider.send_message(to, message)
+        success = True
+    except ProviderError as exc:
+        success = False
+        error_detail = str(exc)
+
+    await webhook_log_service.record(
+        db,
+        room=RoomName.accounts,
+        provider=WHATSAPP_PROVIDER_LOG_NAME,
+        direction=WebhookDirection.outbound,
+        raw_payload={"to": to, "message": message, "provider_message_id": provider_message_id, "error": error_detail},
+        status="sent" if success else f"error:{error_detail}",
+    )
+    await db.flush()
+
+    return {"success": success, "provider_message_id": provider_message_id, "error": error_detail}
+
+
 def _expected_webhook_url() -> str:
     return f"{settings.backend_base_url.rstrip('/')}/api/meeting-room/webhook"
 

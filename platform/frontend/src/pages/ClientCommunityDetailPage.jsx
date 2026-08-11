@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { generateReport, listReports } from '../api/clientMeetingRoom'
-import { addCommunityMember, addRosterNumbers, listCommunityMembers, listRoster } from '../api/clientProfiles'
+import { addCommunityMember, addRosterNumbers, deleteCommunityMember, listCommunityMembers, listRoster } from '../api/clientProfiles'
 
 const emptyMemberForm = { name: '', mobile_number: '', ilc_registration_number: '', email: '' }
 
@@ -21,6 +21,7 @@ export default function ClientCommunityDetailPage() {
   const [addingMember, setAddingMember] = useState(false)
   const [reportsByMember, setReportsByMember] = useState({})
   const [generatingId, setGeneratingId] = useState('')
+  const [deletingId, setDeletingId] = useState('')
 
   async function refresh() {
     const [m, r] = await Promise.all([listCommunityMembers(groupId), listRoster(groupId)])
@@ -85,6 +86,21 @@ export default function ClientCommunityDetailPage() {
       setError(err.response?.data?.detail || 'Could not generate a summary — try again')
     } finally {
       setGeneratingId('')
+    }
+  }
+
+  async function handleDeleteMember(member) {
+    if (!window.confirm(`Remove "${member.name}" from this community? They'll stop receiving WhatsApp replies. This cannot be undone from here.`)) return
+    setError('')
+    setDeletingId(member.id)
+    try {
+      await deleteCommunityMember(groupId, member.id)
+      if (expandedId === member.id) setExpandedId('')
+      await refresh()
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not remove this member')
+    } finally {
+      setDeletingId('')
     }
   }
 
@@ -223,14 +239,24 @@ export default function ClientCommunityDetailPage() {
                     </div>
                   )}
 
-                  <button
-                    className="btn"
-                    disabled={!m.conversation_id || generatingId === m.id}
-                    title={!m.conversation_id ? "This member hasn't started chatting yet" : undefined}
-                    onClick={() => handleGenerateSummary(m)}
-                  >
-                    {generatingId === m.id ? 'Generating…' : 'Generate / refresh summary'}
-                  </button>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      className="btn"
+                      disabled={!m.conversation_id || generatingId === m.id}
+                      title={!m.conversation_id ? "This member hasn't started chatting yet" : undefined}
+                      onClick={() => handleGenerateSummary(m)}
+                    >
+                      {generatingId === m.id ? 'Generating…' : 'Generate / refresh summary'}
+                    </button>
+                    <button
+                      className="btn btn-danger"
+                      style={{ marginLeft: 'auto' }}
+                      disabled={deletingId === m.id}
+                      onClick={() => handleDeleteMember(m)}
+                    >
+                      {deletingId === m.id ? 'Removing…' : 'Remove member'}
+                    </button>
+                  </div>
 
                   {latestSummary(m.id) ? (
                     <MemberSummary c={latestSummary(m.id).content} createdAt={latestSummary(m.id).created_at} />

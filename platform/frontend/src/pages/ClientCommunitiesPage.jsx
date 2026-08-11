@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { createCommunity, listCommunities, regenerateInvite } from '../api/clientProfiles'
+import { createCommunity, deleteCommunity, listCommunities, regenerateInvite } from '../api/clientProfiles'
 import { useClientAuth } from '../context/ClientAuthContext'
 
 const EMPTY_FORM = {
@@ -26,6 +26,7 @@ export default function ClientCommunitiesPage() {
   const [error, setError] = useState('')
   const [copiedId, setCopiedId] = useState('')
   const [busyId, setBusyId] = useState('')
+  const [deletingId, setDeletingId] = useState('')
 
   async function refresh() {
     setCommunities(await listCommunities())
@@ -59,6 +60,20 @@ export default function ClientCommunitiesPage() {
       setError(err.response?.data?.detail || 'Could not regenerate the invite link')
     } finally {
       setBusyId('')
+    }
+  }
+
+  async function handleDelete(groupId, name) {
+    if (!window.confirm(`Delete "${name}"? This removes it and all its members from your dashboard and WhatsApp. This cannot be undone from here.`)) return
+    setError('')
+    setDeletingId(groupId)
+    try {
+      await deleteCommunity(groupId)
+      await refresh()
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not delete this community group')
+    } finally {
+      setDeletingId('')
     }
   }
 
@@ -139,14 +154,24 @@ export default function ClientCommunitiesPage() {
               ) : (
                 <div style={{ fontSize: 12, color: 'var(--sub)' }}>No active invite link.</div>
               )}
-              <button
-                className="btn"
-                style={{ marginTop: 8, fontSize: 11 }}
-                disabled={busyId === c.id}
-                onClick={() => handleRegenerate(c.id)}
-              >
-                {busyId === c.id ? 'Regenerating…' : 'Regenerate link'}
-              </button>
+              <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                <button
+                  className="btn"
+                  style={{ fontSize: 11 }}
+                  disabled={busyId === c.id}
+                  onClick={() => handleRegenerate(c.id)}
+                >
+                  {busyId === c.id ? 'Regenerating…' : 'Regenerate link'}
+                </button>
+                <button
+                  className="btn btn-danger"
+                  style={{ fontSize: 11, marginLeft: 'auto' }}
+                  disabled={deletingId === c.id}
+                  onClick={() => handleDelete(c.id, c.name)}
+                >
+                  {deletingId === c.id ? 'Deleting…' : 'Delete group'}
+                </button>
+              </div>
             </div>
           ))}
         </div>

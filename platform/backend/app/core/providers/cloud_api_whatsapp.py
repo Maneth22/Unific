@@ -18,8 +18,6 @@ import httpx
 from app.config import settings
 from app.core.providers.base import InboundWhatsAppMessage, ProviderError, WhatsAppProvider
 
-GRAPH_API_BASE = "https://graph.facebook.com/v20.0"
-
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +36,7 @@ class CloudAPIWhatsAppProvider(WhatsAppProvider):
     def __init__(self):
         self.token = settings.whatsapp_cloud_api_token
         self.phone_number_id = settings.whatsapp_cloud_api_phone_number_id
+        self.graph_api_base = f"https://graph.facebook.com/{settings.whatsapp_api_version}"
         if not self.token or not self.phone_number_id:
             raise ProviderError(
                 "WhatsApp Cloud API is not configured — set WHATSAPP_CLOUD_API_TOKEN and "
@@ -45,7 +44,7 @@ class CloudAPIWhatsAppProvider(WhatsAppProvider):
             )
 
     async def send_message(self, to_phone: str, text: str) -> str:
-        url = f"{GRAPH_API_BASE}/{self.phone_number_id}/messages"
+        url = f"{self.graph_api_base}/{self.phone_number_id}/messages"
         headers = {"Authorization": f"Bearer {self.token}"}
         body = {"messaging_product": "whatsapp", "to": to_phone, "type": "text", "text": {"body": text}}
         async with httpx.AsyncClient(timeout=10) as client:
@@ -63,7 +62,7 @@ class CloudAPIWhatsAppProvider(WhatsAppProvider):
         template's own `{{1}}`/`{{2}}` placeholders in order. Language
         defaults to `en_US`; pass `params={"language": "en", ...}` to
         override."""
-        url = f"{GRAPH_API_BASE}/{self.phone_number_id}/messages"
+        url = f"{self.graph_api_base}/{self.phone_number_id}/messages"
         headers = {"Authorization": f"Bearer {self.token}"}
         body_params = params.get("body_params") or []
         language = params.get("language", "en_US")
@@ -132,7 +131,7 @@ class CloudAPIWhatsAppProvider(WhatsAppProvider):
                 "Webhook status is unavailable — set WHATSAPP_CLOUD_API_APP_ID and "
                 "WHATSAPP_CLOUD_API_APP_SECRET (Meta App Dashboard > Settings > Basic)."
             )
-        url = f"{GRAPH_API_BASE}/{app_id}/subscriptions"
+        url = f"{self.graph_api_base}/{app_id}/subscriptions"
         params = {"access_token": f"{app_id}|{app_secret}"}
         async with httpx.AsyncClient(timeout=10) as client:
             try:

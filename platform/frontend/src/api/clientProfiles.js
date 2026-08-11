@@ -19,6 +19,10 @@ export const listCommunityMembers = (groupId) =>
   apiClient.get(`/profiles/client/communities/${groupId}/members`).then((r) => r.data)
 export const addCommunityMember = (groupId, payload) =>
   apiClient.post(`/profiles/client/communities/${groupId}/members`, payload).then((r) => r.data)
+export const deleteCommunity = (groupId) =>
+  apiClient.delete(`/profiles/client/communities/${groupId}`).then((r) => r.data)
+export const deleteCommunityMember = (groupId, memberId) =>
+  apiClient.delete(`/profiles/client/communities/${groupId}/members/${memberId}`).then((r) => r.data)
 export const regenerateInvite = (groupId) =>
   apiClient.post(`/profiles/client/communities/${groupId}/invite/regenerate`).then((r) => r.data)
 export const getCommunityProfile = (groupId) =>

@@ -1049,6 +1049,46 @@ async def client_add_community_member(
     )
 
 
+@client_router.delete("/communities/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def client_delete_community(
+    group_id: str, client: ClientUser | ClientStaffUser = Depends(get_current_client_actor), db: AsyncSession = Depends(get_db)
+):
+    """Soft-deletes a community group and every member/sub-group under it
+    in one step (see `services.deactivate_identity`) — it disappears from
+    the client's own dashboard and stops responding on WhatsApp, but its
+    financial/consent/conversation history is preserved, not destroyed."""
+    if group_id == client.identity_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    await identity_scope(identity_id=group_id, client=client, db=db)
+    actor_type = _actor_type_for(client)
+    try:
+        await services.deactivate_identity(db, identity_id=group_id, actor_type=actor_type, actor_id=client.id)
+    except services.ProfilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+
+
+@client_router.delete("/communities/{group_id}/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def client_delete_community_member(
+    group_id: str,
+    member_id: str,
+    client: ClientUser | ClientStaffUser = Depends(get_current_client_actor),
+    db: AsyncSession = Depends(get_db),
+):
+    """Same soft-delete as `client_delete_community`, for a single member.
+    Both `group_id` and `member_id` are run through the scope check —
+    the member must resolve inside the client's own subtree too, not just
+    the group in the URL."""
+    await identity_scope(identity_id=group_id, client=client, db=db)
+    await identity_scope(identity_id=member_id, client=client, db=db)
+    actor_type = _actor_type_for(client)
+    try:
+        await services.deactivate_identity(db, identity_id=member_id, actor_type=actor_type, actor_id=client.id)
+    except services.ProfilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+
+
 @client_router.post("/communities/{group_id}/invite/regenerate", response_model=schemas.GroupInviteOut)
 async def client_regenerate_invite(
     group_id: str, client: ClientUser | ClientStaffUser = Depends(get_current_client_actor), db: AsyncSession = Depends(get_db)

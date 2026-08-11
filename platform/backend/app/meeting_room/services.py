@@ -206,6 +206,10 @@ async def receive_inbound_message(
     perm = await db.get(Permission, link.identity_id)
     if identity is None or perm is None:
         raise Bounced("Linked identity not found")
+    if not identity.is_active:
+        # Soft-deleted (see profiles.services.deactivate_identity) — same
+        # dead-end as an unlinked number, not an error.
+        raise Bounced(f"Identity {identity.id} has been deleted")
 
     try:
         await gate_service.check_and_charge(
@@ -345,6 +349,13 @@ async def _auto_reply(
 ) -> Message:
     context = await _approved_context(db)
     config = _room_config(conversation, perm)
+    recent = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.desc())
+        .limit(16)
+    )
+    chat_history = _build_chat_history(list(reversed(recent.scalars().all())))
     try:
         reply_text = await reply_generator.generate_reply(
             db,
@@ -354,6 +365,7 @@ async def _auto_reply(
             identity_id=identity.id,
             room=RoomName.meeting_room,
             agent_name=AGENT_NAME,
+            chat_history=chat_history,
         )
     except ProviderError as exc:
         logger.warning("Auto-reply generation failed — using fallback reply: %s", exc)

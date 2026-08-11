@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     whatsapp_cloud_api_token: str = ""
     whatsapp_cloud_api_phone_number_id: str = ""
     whatsapp_cloud_api_verify_token: str = ""
+    # Graph API version segment (e.g. "v20.0") used to build every Cloud
+    # API URL in cloud_api_whatsapp.py — was previously a hardcoded module
+    # constant; kept configurable here since Meta deprecates old versions.
+    whatsapp_api_version: str = "v20.0"
     # App-level credentials — only needed for the WhatsApp Diagnostics
     # panel's webhook-status check, which reads Meta's `/subscriptions`
     # edge (a per-app resource, not per-phone-number). Sending/receiving

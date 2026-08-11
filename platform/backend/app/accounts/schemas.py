@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # --- Account Registry ---
@@ -233,6 +233,42 @@ class WhatsAppTestSendRequest(BaseModel):
 
 
 class WhatsAppTestSendOut(BaseModel):
+    success: bool
+    provider_message_id: str | None
+    error: str | None
+
+
+class WhatsAppSendRequest(BaseModel):
+    """POST /api/whatsapp/send — a general-purpose "send a WhatsApp text
+    message" request, distinct from WhatsAppTestSendRequest above (that
+    one is the Diagnostics panel's richer text-or-template tool, billed as
+    an Accounts-room operational cost). No existing phone-number validator
+    exists elsewhere in this codebase to reuse (phone numbers are stored
+    as unvalidated strings throughout) — the checks below are new and
+    scoped to just this endpoint's request body."""
+
+    to: str
+    message: str
+
+    @field_validator("to")
+    @classmethod
+    def _validate_to(cls, v: str) -> str:
+        digits = v.lstrip("+")
+        if not digits.isdigit() or not (8 <= len(digits) <= 15):
+            raise ValueError("to must be a phone number in international format (8-15 digits, optional leading +)")
+        return v
+
+    @field_validator("message")
+    @classmethod
+    def _validate_message(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("message must not be empty")
+        if len(v) > 4096:
+            raise ValueError("message is too long (max 4096 characters)")
+        return v
+
+
+class WhatsAppSendOut(BaseModel):
     success: bool
     provider_message_id: str | None
     error: str | None

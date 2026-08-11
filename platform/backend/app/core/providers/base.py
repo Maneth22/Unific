@@ -106,10 +106,17 @@ class ReplyGenerator(ABC):
         identity_id: str | None,
         room: RoomName,
         agent_name: str,
+        chat_history: str = "",
     ) -> str:
-        """`context_snippets` is drawn only from the Meeting Room's own
-        Shelf 1 (Operational Library, approved_for_auto_reply=True) —
-        callers must never pass it anything else."""
+        """The community service agent's reply-drafting step. `context_snippets`
+        is drawn from the Meeting Room's own Shelf 1 (Operational Library,
+        approved_for_auto_reply=True) — organization-provided reference
+        material the implementation may use when relevant, not a hard
+        boundary on what it's allowed to say. `chat_history` (formatted by
+        `app.meeting_room.services._build_chat_history`) is the recent
+        conversation so far, letting a real implementation hold a
+        conversational, session-aware exchange rather than answering each
+        message in isolation."""
 
 
 @dataclass

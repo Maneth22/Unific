@@ -85,6 +85,12 @@ export default function ClientLoginPage() {
         <div style={{ textAlign: 'center', marginTop: 14, fontSize: 12 }}>
           <Link to="/client/signup">Don't have an account? Register your organisation</Link>
         </div>
+        <div style={{ textAlign: 'center', marginTop: 8, fontSize: 12 }}>
+          <Link to="/support/login">Staff &amp; Partners? Sign in here</Link>
+        </div>
+        <div style={{ textAlign: 'center', marginTop: 8, fontSize: 12 }}>
+          <Link to="/">← Back to home</Link>
+        </div>
       </form>
     </div>
   )

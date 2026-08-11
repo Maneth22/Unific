@@ -25,6 +25,7 @@ from app.core.models.client import ClientStaffUser, ClientUser
 from app.core.security.jwt import decode_access_token
 from app.core.services import scope_service
 from app.database import get_db
+from app.profiles.models import Identity
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -129,6 +130,12 @@ def require_identity_scope(*, owner_only: bool = False):
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="This identity is outside your account's scope",
             )
+        # A deactivated (soft-deleted) identity — see
+        # app.profiles.services.deactivate_identity — reads as gone, not
+        # merely out of scope, to every route that reaches it through here.
+        target = await db.get(Identity, identity_id)
+        if target is None or not target.is_active:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="This identity was not found")
         return client
 
     return checker

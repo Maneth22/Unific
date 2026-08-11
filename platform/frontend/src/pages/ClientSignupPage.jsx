@@ -31,7 +31,7 @@ export default function ClientSignupPage() {
             An Admin needs to review and approve your organisation before you can log in. You'll be
             notified once it's approved.
           </p>
-          <Link to="/client/login" className="btn" style={{ display: 'inline-block', marginTop: 14 }}>
+          <Link to="/login" className="btn" style={{ display: 'inline-block', marginTop: 14 }}>
             Back to login
           </Link>
         </div>
@@ -90,7 +90,7 @@ export default function ClientSignupPage() {
         </button>
 
         <div style={{ textAlign: 'center', marginTop: 14, fontSize: 12 }}>
-          <Link to="/client/login">Already approved? Sign in</Link>
+          <Link to="/login">Already approved? Sign in</Link>
         </div>
       </form>
     </div>

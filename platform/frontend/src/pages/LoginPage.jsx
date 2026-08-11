@@ -1,9 +1,18 @@
 import React, { useState } from 'react'
-import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
+// Where a signed-in staff account lands with no more specific destination
+// (no `location.state.from`, i.e. they came straight here rather than
+// being bounced off a protected route) — admin tier gets the full
+// dashboard, everyone else gets the portal, since /staff is gated by
+// RequireAdmin and would otherwise bounce a non-admin straight to /403.
+function defaultDestinationFor(staff) {
+  return staff?.tier === 'admin' ? '/staff' : '/portal'
+}
+
 export default function LoginPage() {
-  const { isAuthenticated, login } = useAuth()
+  const { isAuthenticated, staff, login } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const [searchParams] = useSearchParams()
@@ -14,7 +23,7 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false)
 
   if (isAuthenticated) {
-    return <Navigate to={location.state?.from?.pathname || '/staff'} replace />
+    return <Navigate to={location.state?.from?.pathname || defaultDestinationFor(staff)} replace />
   }
 
   async function handleSubmit(e) {
@@ -22,8 +31,8 @@ export default function LoginPage() {
     setError('')
     setSubmitting(true)
     try {
-      await login(email, password)
-      navigate(location.state?.from?.pathname || '/staff', { replace: true })
+      const data = await login(email, password)
+      navigate(location.state?.from?.pathname || defaultDestinationFor(data.staff), { replace: true })
     } catch (err) {
       if (err.response?.status === 429) {
         setError('Too many failed attempts. Try again later.')
@@ -99,6 +108,13 @@ export default function LoginPage() {
         <button type="submit" className="btn btn-primary" style={{ width: '100%' }} disabled={submitting}>
           {submitting ? 'Signing in…' : 'Sign in'}
         </button>
+
+        <div style={{ textAlign: 'center', marginTop: 14, fontSize: 12 }}>
+          <Link to="/login">Client, not staff? Sign in here</Link>
+        </div>
+        <div style={{ textAlign: 'center', marginTop: 8, fontSize: 12 }}>
+          <Link to="/">← Back to home</Link>
+        </div>
       </form>
     </div>
   )
