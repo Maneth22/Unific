@@ -1,11 +1,11 @@
-"""The message pipeline: WhatsApp -> Profiles gate check -> the comms
-agent (clarify inbound / translate outbound, in the room's configured
-language, tone and character) -> WhatsApp send -> everything logged.
-This is the literal implementation of "a message comes in, we find whose
-it is, and we answer it" — with the intermediary-agent layer ported from
-the prototype so neither side ever hits a language barrier: the community
-member reads their own language in the character's voice, the client
-reads clear English with tone insights.
+"""Meeting Room state and services not owned by the WhatsApp community
+agent: WhatsApp link management, the admin/client conversation viewer,
+manual replies, session reports, and video-call meetings. The agent's own
+behavior (inbound message handling, auto-reply generation, session state)
+lives in `app.agents.whatsapp_community` — this module still owns the
+`Conversation`/`Message`/`WhatsAppLink` tables themselves (core relational
+data other things reference) and everything that isn't the agent's own
+turn-by-turn decision logic.
 """
 from __future__ import annotations
 
@@ -17,13 +17,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.agents.whatsapp_community.session_store import append_turn_if_session_active
 from app.config import settings
-from app.core.models.archive import ArchiveItemStatus, ArchiveShelf
 from app.core.models.audit import ActorType
 from app.core.models.common import RoomName, utcnow, uuid_str
-from app.core.providers.base import CommsAgent, ProviderError, ReplyGenerator, VideoProvider, WhatsAppProvider
-from app.core.providers.stub_reply_generator import FALLBACK_REPLY
-from app.core.services import archive_service, audit_service, calendar_service, gate_service, spend_service
+from app.core.providers.base import CommsAgent, ProviderError, VideoProvider, WhatsAppProvider
+from app.core.services import audit_service, calendar_service, spend_service
 from app.meeting_room import live_translation
 from app.meeting_room.models import (
     Conversation,
@@ -39,12 +38,16 @@ from app.meeting_room.models import (
     SessionReport,
     WhatsAppLink,
 )
+from app.meeting_room.phone_utils import normalize_phone
 from app.profiles.models import ClientOrgProfile, Identity, Permission
 
 logger = logging.getLogger(__name__)
 
+# Kept here (not moved to app.agents.whatsapp_community) since
+# send_manual_reply/generate_report — both owned by this module — still
+# spend against the same agent_name/cost, for one consistent
+# llm_usage/spend ledger regardless of which module actually made the call.
 AGENT_NAME = "comms_agent"
-REPLY_COST = Decimal("0")  # the base Meeting Room reply is UNIFIC's free-to-near-free running cost
 OPERATIONAL_COST_PER_REPLY = Decimal("0.01")  # nominal — establishes the spend-tracking pattern
 MAX_MESSAGE_LENGTH = 5000
 
@@ -53,20 +56,10 @@ class MeetingRoomError(Exception):
     pass
 
 
-class Bounced(Exception):
-    """Raised (and caught by the caller) when an inbound message is
-    intentionally not processed further — unregistered sender, or a
-    provider failure on send. Distinct from MeetingRoomError, which is
-    a caller-facing 4xx-shaped problem."""
-
-    def __init__(self, reason: str):
-        self.reason = reason
-        super().__init__(reason)
-
-
 async def link_phone_number(
     db: AsyncSession, phone_number: str, identity_id: str, *, actor_type: ActorType, actor_id: str | None
 ) -> WhatsAppLink:
+    phone_number = normalize_phone(phone_number)
     existing = await db.execute(select(WhatsAppLink).where(WhatsAppLink.phone_number == phone_number))
     row = existing.scalar_one_or_none()
     before_identity_id = row.identity_id if row else None
@@ -90,7 +83,7 @@ async def link_phone_number(
     return row
 
 
-async def _get_or_create_conversation(db: AsyncSession, identity_id: str) -> Conversation:
+async def get_or_create_conversation(db: AsyncSession, identity_id: str) -> Conversation:
     result = await db.execute(
         select(Conversation).where(Conversation.identity_id == identity_id, Conversation.status == ConversationStatus.active)
     )
@@ -122,7 +115,7 @@ async def initiate_comms_room(
     if identity is None:
         raise MeetingRoomError("Identity not found")
 
-    conversation = await _get_or_create_conversation(db, identity_id)
+    conversation = await get_or_create_conversation(db, identity_id)
     conversation.target_language = (target_language or "auto").strip().lower() or "auto"
     conversation.tone = (tone or "").strip().lower()
     conversation.character_name = (character_name or "").strip()
@@ -149,10 +142,14 @@ async def initiate_comms_room(
     return conversation
 
 
-def _room_config(conversation: Conversation, perm: Permission) -> dict:
+def room_config(conversation: Conversation, perm: Permission) -> dict:
     """The room's effective language/tone/character: conversation-level
     settings (what the initiator chose) win; anything unset falls back to
-    the identity's inherited reply config from profiles.permission."""
+    the identity's inherited reply config from profiles.permission. Public
+    (not `_room_config`) since `app.agents.whatsapp_community.orchestrator`
+    needs it too — both this module's own `send_manual_reply`/
+    `_outbound_translation`-equivalent flow and the agent's auto-reply flow
+    build the same room config."""
     character_name = conversation.character_name or perm.effective_reply_character
     character = f"{character_name}, {conversation.character_role}" if conversation.character_role else character_name
     return {
@@ -167,7 +164,12 @@ def _room_config(conversation: Conversation, perm: Permission) -> dict:
 def _build_chat_history(messages: list[Message], max_pairs: int = 4) -> str:
     """The most recent community/client exchange pairs, formatted the way
     the prototype's translation agent expects — used so "auto" language
-    can mirror whatever the community member writes in."""
+    can mirror whatever the community member writes in. Only this module's
+    own `_outbound_translation` (manual-reply path) still reads Postgres
+    `Message` history directly; the agent's own equivalent
+    (`app.agents.whatsapp_community.orchestrator._build_chat_history`)
+    reads today's turns from Redis instead, since today's `Message` rows
+    don't exist yet before flush."""
     lines: list[str] = []
     for msg in messages[-(max_pairs * 4):]:
         if msg.direction == MessageDirection.inbound:
@@ -175,124 +177,6 @@ def _build_chat_history(messages: list[Message], max_pairs: int = 4) -> str:
         else:
             lines.append(f"[Client]: {msg.final_text or msg.original_text}")
     return "\n".join(lines[-(max_pairs * 2):]) if lines else "No previous conversation."
-
-
-async def _approved_context(db: AsyncSession, limit: int = 5) -> list[str]:
-    items = await archive_service.list_shelf(db, RoomName.meeting_room, ArchiveShelf.operational_library)
-    approved = [i for i in items if i.approved_for_auto_reply and i.status == ArchiveItemStatus.active]
-    snippets = []
-    for item in approved[:limit]:
-        text = item.content.get("text") if isinstance(item.content, dict) else None
-        snippets.append(text or item.description or item.title)
-    return snippets
-
-
-async def receive_inbound_message(
-    db: AsyncSession,
-    *,
-    from_phone: str,
-    text: str,
-    provider_message_id: str,
-    comms_agent: CommsAgent,
-    reply_generator: ReplyGenerator,
-    whatsapp_provider: WhatsAppProvider,
-) -> Message:
-    link_result = await db.execute(select(WhatsAppLink).where(WhatsAppLink.phone_number == from_phone))
-    link = link_result.scalar_one_or_none()
-    if link is None:
-        raise Bounced(f"No identity linked to {from_phone}")
-
-    identity = await db.get(Identity, link.identity_id)
-    perm = await db.get(Permission, link.identity_id)
-    if identity is None or perm is None:
-        raise Bounced("Linked identity not found")
-    if not identity.is_active:
-        # Soft-deleted (see profiles.services.deactivate_identity) — same
-        # dead-end as an unlinked number, not an error.
-        raise Bounced(f"Identity {identity.id} has been deleted")
-
-    try:
-        await gate_service.check_and_charge(
-            db, identity_id=identity.id, room=RoomName.meeting_room, action="receive_message", cost=REPLY_COST
-        )
-    except gate_service.GateError as exc:
-        raise Bounced(str(exc)) from exc
-
-    conversation = await _get_or_create_conversation(db, identity.id)
-
-    # Clarify: detect the community member's language and produce the
-    # clear-English restatement the client reads. A provider outage must
-    # never stop the raw message being logged.
-    detected_lang = ""
-    clarification = ""
-    tone_analysis: dict = {}
-    try:
-        result = await comms_agent.clarify_inbound(
-            db, text, identity_id=identity.id, room=RoomName.meeting_room, agent_name=AGENT_NAME
-        )
-        detected_lang = result.detected_code
-        clarification = result.clarification
-        try:
-            tone_analysis = await comms_agent.analyze_tone(
-                db,
-                text,
-                detected_language=result.detected_language,
-                identity_id=identity.id,
-                room=RoomName.meeting_room,
-                agent_name=AGENT_NAME,
-            )
-        except ProviderError as exc:
-            logger.warning("Tone analysis failed for inbound message: %s", exc)
-            tone_analysis = {}
-    except ProviderError as exc:
-        logger.warning("Clarification failed for inbound message: %s", exc)
-
-    inbound = Message(
-        conversation_id=conversation.id,
-        direction=MessageDirection.inbound,
-        original_text=text,
-        detected_language=detected_lang,
-        translated_text=clarification,
-        tone_analysis=tone_analysis,
-        final_text=text,
-        provider_message_id=provider_message_id,
-    )
-    db.add(inbound)
-    await db.flush()
-
-    await audit_service.record(
-        db,
-        actor_type=ActorType.system,
-        actor_id=None,
-        action="meeting_room.message.received",
-        room=RoomName.meeting_room,
-        entity_type="message",
-        entity_id=str(inbound.id),
-        after={"identity_id": identity.id, "from_phone": from_phone},
-    )
-
-    if not perm.effective_connected:
-        # Passive — the person uses their own phone as normal; Comms logs
-        # but does not auto-reply.
-        await db.flush()
-        return inbound
-
-    if perm.effective_auto_respond:
-        await _auto_reply(
-            db,
-            conversation=conversation,
-            identity=identity,
-            perm=perm,
-            inbound_text=clarification or text,
-            to_phone=from_phone,
-            comms_agent=comms_agent,
-            reply_generator=reply_generator,
-            whatsapp_provider=whatsapp_provider,
-        )
-    # else: Manual mode — the message waits in the conversation for the
-    # client or a staff member to answer via `send_manual_reply`.
-
-    return inbound
 
 
 async def _outbound_translation(
@@ -306,10 +190,18 @@ async def _outbound_translation(
     """English -> the room's configured language/tone/character, with the
     recent chat history so "auto" can mirror the community member's own
     language. Degrades to sending the English untranslated on a provider
-    outage — untranslated beats silence."""
+    outage — untranslated beats silence. Used only by `send_manual_reply`
+    below (a staff/client-initiated reply, always written straight to
+    Postgres, unlike the agent's own auto-reply path). Known limitation:
+    since today's auto-reply turns live in Redis until end-of-day flush
+    (see app.agents.whatsapp_community.session_store), a manual reply sent
+    the same day as unflushed auto-reply activity won't see that activity
+    in its chat_history context here — it only sees Postgres history from
+    prior flushes. Degrades gracefully (less context, not broken); revisit
+    if this proves to matter in practice."""
     from app.core.providers.base import OutboundTranslation
 
-    config = _room_config(conversation, perm)
+    config = room_config(conversation, perm)
     recent = await db.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id)
@@ -333,69 +225,6 @@ async def _outbound_translation(
     except ProviderError as exc:
         logger.warning("Outbound translation failed — sending untranslated English: %s", exc)
         return OutboundTranslation(translated_text=english_text, key_points=[], english_preview=english_text)
-
-
-async def _auto_reply(
-    db: AsyncSession,
-    *,
-    conversation: Conversation,
-    identity: Identity,
-    perm: Permission,
-    inbound_text: str,
-    to_phone: str,
-    comms_agent: CommsAgent,
-    reply_generator: ReplyGenerator,
-    whatsapp_provider: WhatsAppProvider,
-) -> Message:
-    context = await _approved_context(db)
-    config = _room_config(conversation, perm)
-    recent = await db.execute(
-        select(Message)
-        .where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at.desc())
-        .limit(16)
-    )
-    chat_history = _build_chat_history(list(reversed(recent.scalars().all())))
-    try:
-        reply_text = await reply_generator.generate_reply(
-            db,
-            message_text=inbound_text,
-            context_snippets=context,
-            config=config,
-            identity_id=identity.id,
-            room=RoomName.meeting_room,
-            agent_name=AGENT_NAME,
-            chat_history=chat_history,
-        )
-    except ProviderError as exc:
-        logger.warning("Auto-reply generation failed — using fallback reply: %s", exc)
-        reply_text = FALLBACK_REPLY  # the LLM is down — still respond with something, not silence
-
-    translation = await _outbound_translation(
-        db, conversation=conversation, perm=perm, english_text=reply_text, comms_agent=comms_agent
-    )
-
-    try:
-        provider_id = await whatsapp_provider.send_message(to_phone, translation.translated_text)
-    except ProviderError:
-        provider_id = ""  # logged as sent=False via empty provider_message_id; not fatal to the pipeline
-
-    outbound = Message(
-        conversation_id=conversation.id,
-        direction=MessageDirection.outbound,
-        mode=ReplyMode.auto,
-        original_text=reply_text,
-        translated_text=translation.translated_text,
-        final_text=translation.translated_text,
-        key_points=translation.key_points,
-        provider_message_id=provider_id,
-    )
-    db.add(outbound)
-    await spend_service.record_spend(
-        db, room=RoomName.meeting_room, agent_name=AGENT_NAME, amount=OPERATIONAL_COST_PER_REPLY, description="Auto reply"
-    )
-    await db.flush()
-    return outbound
 
 
 async def send_manual_reply(
@@ -440,6 +269,29 @@ async def send_manual_reply(
         provider_message_id=provider_id,
     )
     db.add(outbound)
+    # Best-effort mirror into today's live Redis session (if the agent has
+    # one for this identity) so a same-day auto-reply's chat history
+    # doesn't miss a manual reply that happened in between — a Redis
+    # outage here must never break manual replies themselves.
+    # already_persisted=True tells flush_service this turn is context-only:
+    # the Message row above is already committed to Postgres directly by
+    # this function, so flush must never re-insert it from Redis too.
+    try:
+        await append_turn_if_session_active(
+            conversation.identity_id,
+            {
+                "direction": "outbound",
+                "mode": "manual",
+                "original_text": text,
+                "translated_text": translation.translated_text,
+                "final_text": translation.translated_text,
+                "key_points": translation.key_points,
+                "provider_message_id": provider_id,
+                "already_persisted": True,
+            },
+        )
+    except Exception:
+        logger.warning("Failed to mirror manual reply into the live Redis session (non-fatal)", exc_info=True)
     await spend_service.record_spend(
         db, room=RoomName.meeting_room, agent_name=AGENT_NAME, amount=OPERATIONAL_COST_PER_REPLY, description="Manual reply (translated)"
     )
@@ -563,6 +415,40 @@ async def get_conversation_with_messages(db: AsyncSession, conversation_id: str)
 _JOINABLE_STATUSES = (MeetingStatus.scheduled, MeetingStatus.live)
 
 
+async def _send_whatsapp_meeting_invites(
+    db: AsyncSession,
+    pending_invites: list[tuple[str, MeetingInvite]],
+    *,
+    scheduled_at: datetime,
+    whatsapp_provider: WhatsAppProvider,
+) -> None:
+    """Best-effort — a send failure, or an identity with no linked
+    WhatsApp number at all (a meeting's host can legitimately be a
+    group/org-root identity, never phone-linked), must never block
+    scheduling itself. No Message/Conversation row is created for this —
+    it's a one-off transactional notification, not a conversational turn,
+    and would otherwise pollute _build_chat_history's context for the
+    community agent's later replies to the same person. No translation
+    either for the same reason: that's the _auto_reply conversation
+    pipeline's job, not this one."""
+    if not pending_invites:
+        return
+    identity_ids = [identity_id for identity_id, _ in pending_invites]
+    result = await db.execute(select(WhatsAppLink).where(WhatsAppLink.identity_id.in_(identity_ids)))
+    phone_by_identity = {link.identity_id: link.phone_number for link in result.scalars().all()}
+    for identity_id, invite in pending_invites:
+        phone_number = phone_by_identity.get(identity_id)
+        if not phone_number:
+            continue  # e.g. a group/org-root host — nothing to send to
+        url = f"{settings.frontend_base_url.rstrip('/')}/meeting-room/join/{invite.token}"
+        text = f"You've been invited to a meeting on {scheduled_at.strftime('%b %d, %Y at %H:%M UTC')}. Join here: {url}"
+        try:
+            await whatsapp_provider.send_message(phone_number, text)
+            logger.info("WhatsApp meeting invite sent identity=%s", identity_id)
+        except ProviderError:
+            logger.warning("Failed to send WhatsApp meeting invite identity=%s", identity_id)
+
+
 async def schedule_meeting(
     db: AsyncSession,
     *,
@@ -576,6 +462,7 @@ async def schedule_meeting(
     staff_participant_ids: list[str] | None = None,
     meeting_kind: str = "community",
     video_provider: VideoProvider,
+    whatsapp_provider: WhatsAppProvider,
 ) -> Meeting:
     """Creates the meeting row, its LiveKit room, and a MeetingParticipant
     (+ MeetingInvite, for identity-side participants) for the host, the
@@ -646,12 +533,19 @@ async def schedule_meeting(
     # node to host it) — only real identity ids become identity-side
     # participants/invites; the host is still a participant via the
     # staff_participant_ids loop above in that case.
+    pending_invites: list[tuple[str, MeetingInvite]] = []
     for identity_id in {host_identity_id, *(participant_identity_ids or [])} - {None}:
         participant = MeetingParticipant(meeting_id=meeting.id, identity_id=identity_id)
         db.add(participant)
         await db.flush()
-        db.add(MeetingInvite(meeting_id=meeting.id, participant_id=participant.id, expires_at=invite_expires_at))
+        invite = MeetingInvite(meeting_id=meeting.id, participant_id=participant.id, expires_at=invite_expires_at)
+        db.add(invite)
+        pending_invites.append((identity_id, invite))
     await db.flush()
+
+    await _send_whatsapp_meeting_invites(
+        db, pending_invites, scheduled_at=scheduled_at, whatsapp_provider=whatsapp_provider
+    )
 
     await calendar_service.submit_timing(
         db,

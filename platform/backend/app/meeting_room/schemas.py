@@ -38,6 +38,11 @@ class MessageOut(BaseModel):
 class ConversationOut(BaseModel):
     id: str
     identity_id: str
+    # Not a real column on Conversation — populated explicitly by the
+    # staff list/detail routes (see router.py) for the admin conversation
+    # viewer; defaults to "" everywhere else that still returns a plain
+    # ORM Conversation via from_attributes (client routes, initiate).
+    identity_name: str = ""
     status: str
     target_language: str
     tone: str

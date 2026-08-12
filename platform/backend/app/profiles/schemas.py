@@ -36,6 +36,7 @@ class OwnPermissionUpdate(BaseModel):
     own_can_message_scope: str | None = None
     own_can_receive_scope: str | None = None
     own_credit_cap: Decimal | None = None
+    own_daily_reply_cap: int | None = None
     own_reply_role: str | None = None
     own_reply_tone: str | None = None
     own_reply_complexity: str | None = None
@@ -53,6 +54,7 @@ class PermissionOut(BaseModel):
     own_can_message_scope: str | None
     own_can_receive_scope: str | None
     own_credit_cap: Decimal | None
+    own_daily_reply_cap: int | None
     own_reply_role: str | None
     own_reply_tone: str | None
     own_reply_complexity: str | None
@@ -67,6 +69,7 @@ class PermissionOut(BaseModel):
     effective_can_message_scope: str
     effective_can_receive_scope: str
     effective_credit_cap: Decimal | None
+    effective_daily_reply_cap: int | None
     effective_reply_role: str
     effective_reply_tone: str
     effective_reply_complexity: str

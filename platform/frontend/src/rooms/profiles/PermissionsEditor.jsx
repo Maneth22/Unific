@@ -58,6 +58,7 @@ export default function PermissionsEditor({ identityId }) {
           <EffectiveRow label="Can message" value={perm.effective_can_message_scope} />
           <EffectiveRow label="Can receive" value={perm.effective_can_receive_scope} />
           <EffectiveRow label="Credit cap" value={perm.effective_credit_cap ?? 'unlimited'} />
+          <EffectiveRow label="Daily reply cap" value={perm.effective_daily_reply_cap ?? 'unlimited'} />
           <EffectiveRow label="Role" value={perm.effective_reply_role} />
           <EffectiveRow label="Tone" value={perm.effective_reply_tone} />
           <EffectiveRow label="Complexity" value={perm.effective_reply_complexity} />
@@ -75,6 +76,7 @@ export default function PermissionsEditor({ identityId }) {
           <ScopeField label="Can message" name="own_can_message_scope" form={form} setForm={setForm} />
           <ScopeField label="Can receive" name="own_can_receive_scope" form={form} setForm={setForm} />
           <TextField label="Credit cap" name="own_credit_cap" form={form} setForm={setForm} type="number" />
+          <TextField label="Daily reply cap" name="own_daily_reply_cap" form={form} setForm={setForm} type="number" />
           <TextField label="Role" name="own_reply_role" form={form} setForm={setForm} />
           <TextField label="Tone" name="own_reply_tone" form={form} setForm={setForm} />
           <TextField label="Complexity" name="own_reply_complexity" form={form} setForm={setForm} />

@@ -11,6 +11,8 @@ rest of this provider.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 
 import httpx
@@ -30,6 +32,26 @@ def verify_handshake(mode: str | None, token: str | None, challenge: str | None)
     if not settings.whatsapp_cloud_api_verify_token or token != settings.whatsapp_cloud_api_verify_token:
         return None
     return challenge
+
+
+def verify_signature(app_secret: str, raw_body: bytes, signature_header: str | None) -> bool:
+    """Meta signs every POST webhook body with HMAC-SHA256 keyed by the
+    app secret, sent as `X-Hub-Signature-256: sha256=<hex>`. Verifying it
+    means an attacker can't forge inbound-message events (which would
+    otherwise reach `receive_inbound_message` as if they were real WhatsApp
+    traffic) without knowing the app secret.
+
+    Returns True (skip enforcement) if `app_secret` is unset — mirrors
+    `get_webhook_configuration`'s degrade-for-dev pattern above, so a bare
+    checkout with no Cloud API app-level credentials configured isn't
+    broken; production deployments must set WHATSAPP_CLOUD_API_APP_SECRET
+    for this check to actually do anything."""
+    if not app_secret:
+        return True
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    expected = hmac.new(app_secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature_header.removeprefix("sha256="))
 
 
 class CloudAPIWhatsAppProvider(WhatsAppProvider):

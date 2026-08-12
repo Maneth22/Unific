@@ -3,18 +3,18 @@ behind the Meeting Room's Auto mode. Open and conversational: it uses the
 conversation's own history for continuity and may draw on
 `context_snippets` (still restricted upstream to the room's own Shelf 1,
 approved_for_auto_reply items — see
-app.meeting_room.services._approved_context) as optional reference
-material, but is no longer hard-limited to only ever repeating that
-material. `FALLBACK_REPLY` is still used, just narrower now: only when the
-provider call itself fails (see the `except ProviderError` path in
-app.meeting_room.services._auto_reply), never as a "nothing approved
-matched" short-circuit.
+app.agents.whatsapp_community.orchestrator._approved_context) as optional
+reference material, but is no longer hard-limited to only ever repeating
+that material. `FALLBACK_REPLY` is still used, just narrower now: only
+when the provider call itself fails (see the `except ProviderError` path
+in app.agents.whatsapp_community.orchestrator.generate_and_send_reply),
+never as a "nothing approved matched" short-circuit.
 
-Extension points for future work (not implemented here):
-  - Vector search / retrieval: a future step would enrich `context_snippets`
-    with results from a vector-search lookup before this function builds
-    its prompt — i.e. upstream of `generate_reply`, in
-    app.meeting_room.services._approved_context or a new sibling function.
+Extension points for future work (not implemented here — Phase 2):
+  - Vector search / retrieval: `_approved_context` is replaced by a real
+    per-client RAG lookup (a `search_knowledge_base` tool call) instead of
+    this text-locker context, at the same time the Archive Locker itself
+    is removed — see the WhatsApp Agents Platform plan.
   - Gemini function/tool calling: a future change would build a
     `types.Tool`/`FunctionDeclaration` list and pass it through to
     `gemini_client.generate()` (which does not currently accept a `tools`
@@ -24,11 +24,12 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.whatsapp_community import session_store
+from app.agents.whatsapp_community.providers.stub_reply_generator import FALLBACK_REPLY
 from app.config import settings
 from app.core.models.common import RoomName
 from app.core.providers.base import ReplyGenerator
 from app.core.providers.gemini_client import GeminiResult, generate
-from app.core.providers.stub_reply_generator import FALLBACK_REPLY
 from app.core.services import llm_usage_service
 
 SYSTEM_TEMPLATE = """You are UNIFIC's community service agent, chatting with a member of a rural community programme over WhatsApp.
@@ -98,5 +99,7 @@ class GeminiReplyGenerator(ReplyGenerator):
             total_tokens=result.total_tokens,
             estimated_cost=result.estimated_cost,
         )
+        if identity_id is not None:
+            await session_store.incr_token_usage(identity_id, result.total_tokens or 0)
 
         return result.text or FALLBACK_REPLY

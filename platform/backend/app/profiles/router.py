@@ -21,6 +21,7 @@ from app.core.models.audit import ActorType
 from app.core.models.client import ClientRegistrationStatus, ClientStaffUser, ClientUser
 from app.core.models.common import RoomName
 from app.core.models.staff import RefreshToken, StaffUser
+from app.core.rate_limit import limiter
 from app.core.security.cookies import (
     CLIENT_COOKIE_PATH,
     CLIENT_STAFF_COOKIE_PATH,
@@ -922,12 +923,10 @@ async def client_create_community(
 ):
     """A client (owner or staff) builds an ILC community group (e.g.
     "ILC Sundarkhal") under their own scope, with the full registration-
-    record field set. The group is opened for auto-reply on creation
-    (`own_connected`/`own_auto_respond=True`) — every new Identity
-    otherwise inherits `connected=False`, and the entire point of the
-    public registration flow below is that a member who fills the form
-    can talk to the agent immediately, with no separate manual step to
-    open the group first."""
+    record field set. `create_ilc_group_identity` itself opens the group
+    for auto-reply on creation — see that function's docstring — so every
+    member who later fills the public registration form below can talk to
+    the agent immediately, with no separate manual step required here."""
     await identity_scope(identity_id=req.parent_id, client=client, db=db)
     actor_type = _actor_type_for(client)
     try:
@@ -948,10 +947,6 @@ async def client_create_community(
             objective=req.objective,
             cooperative_type=req.cooperative_type,
             bank_account=req.bank_account,
-        )
-        await services.update_own_permission(
-            db, group.id, actor_type=actor_type, actor_id=client.id,
-            own_connected=True, own_auto_respond=True,
         )
         invite = await services.create_or_rotate_group_invite(
             db, identity_id=group.id, actor_type=actor_type, actor_id=client.id
@@ -1149,7 +1144,8 @@ public_router = APIRouter(prefix="/api/profiles/public", tags=["profiles:public"
 
 
 @public_router.post("/client-signup", response_model=schemas.ClientSignupOut, status_code=status.HTTP_201_CREATED)
-async def public_client_signup(req: schemas.ClientSignupRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit(settings.rate_limit_webhook)
+async def public_client_signup(request: Request, req: schemas.ClientSignupRequest, db: AsyncSession = Depends(get_db)):
     try:
         request = await services.submit_client_registration(
             db, org_name=req.org_name, contact_name=req.contact_name, email=req.email, password=req.password
@@ -1161,7 +1157,8 @@ async def public_client_signup(req: schemas.ClientSignupRequest, db: AsyncSessio
 
 
 @public_router.get("/invite/{token}", response_model=schemas.PublicGroupInfoOut)
-async def public_get_invite(token: str, db: AsyncSession = Depends(get_db)):
+@limiter.limit(settings.rate_limit_webhook)
+async def public_get_invite(request: Request, token: str, db: AsyncSession = Depends(get_db)):
     invite = await services.get_invite_by_token(db, token)
     if invite is None:
         raise HTTPException(status_code=404, detail="This registration link is invalid or has expired")
@@ -1176,7 +1173,10 @@ async def public_get_invite(token: str, db: AsyncSession = Depends(get_db)):
 
 
 @public_router.post("/invite/{token}/register", response_model=schemas.MemberRegistrationResponse)
-async def public_register_member(token: str, req: schemas.MemberRegistrationRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit(settings.rate_limit_webhook)
+async def public_register_member(
+    request: Request, token: str, req: schemas.MemberRegistrationRequest, db: AsyncSession = Depends(get_db)
+):
     """Orchestrates across profiles + meeting_room in the router, not the
     service layer — matching the existing convention that routers, not
     services, cross room boundaries (meeting_room/router.py already calls

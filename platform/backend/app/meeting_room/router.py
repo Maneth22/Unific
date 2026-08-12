@@ -2,15 +2,21 @@
 codebase not gated by staff/client auth — it's the external inbound
 channel — but every message it admits still goes through
 `gate_service.check_and_charge` inside the pipeline before anything
-happens, so an unlinked phone number is bounced immediately.
+happens, so an unlinked phone number is bounced immediately, and every
+POST body is HMAC-signature-verified (see `verify_signature`) before it's
+trusted at all.
 """
 from __future__ import annotations
+
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts import schemas as accounts_schemas
+from app.agents.whatsapp_community import orchestrator
+from app.agents.whatsapp_community.flush_service import flush_all_sessions
 from app.config import settings
 from app.core.models.archive import ArchiveShelf
 from app.core.models.audit import ActorType
@@ -19,15 +25,16 @@ from app.core.models.common import RoomName
 from app.core.models.staff import StaffUser
 from app.core.models.webhook_log import WebhookDirection
 from app.core.providers.base import ProviderError
-from app.core.providers.cloud_api_whatsapp import verify_handshake
+from app.core.providers.cloud_api_whatsapp import verify_handshake, verify_signature
 from app.core.providers.factory import get_comms_agent, get_reply_generator, get_video_provider, get_whatsapp_provider
+from app.core.rate_limit import limiter
 from app.core.security.dependencies import require_admin, require_any_staff
 from app.core.services import archive_service, scope_service, webhook_log_service
 from app.database import get_db
 from app.meeting_room import schemas, services
 from app.meeting_room.models import Conversation, ReportType, WhatsAppLink
 from app.tasking import services as tasking_services
-from app.profiles.models import Permission
+from app.profiles.models import Identity, Permission
 from app.profiles.security import get_current_client_user
 from app.profiles.services import update_own_permission
 
@@ -41,7 +48,9 @@ WHATSAPP_PROVIDER_LOG_NAME = "whatsapp_cloud_api"
 # --- Inbound webhook (no staff/client auth — the external channel) ---
 
 @router.get("/webhook")
+@limiter.limit(settings.rate_limit_webhook)
 async def verify_webhook(
+    request: Request,
     hub_mode: str | None = Query(default=None, alias="hub.mode"),
     hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
     hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
@@ -57,17 +66,40 @@ async def verify_webhook(
 
 
 @router.post("/webhook")
+@limiter.limit(settings.rate_limit_webhook)
 async def inbound_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """Every field here is untrusted input straight off the wire (see
-    `docs/ARCHITECTURE.md`'s security boundaries) — `CloudAPIWhatsAppProvider.
-    parse_webhook` validates shape before use, and `receive_inbound_message`
-    bounces any phone number that doesn't resolve to a known, linked
-    identity before it ever reaches `gate_service.check_and_charge`. The
-    raw payload is logged to `core.webhook_log` unconditionally — even a
-    malformed payload or an unhandled downstream error still gets a row,
+    `docs/ARCHITECTURE.md`'s security boundaries) — the raw body is HMAC-
+    verified against Meta's `X-Hub-Signature-256` header before it's
+    trusted at all (see `verify_signature`), `CloudAPIWhatsAppProvider.
+    parse_webhook` validates shape before use, and
+    `orchestrator.receive_inbound_message` bounces any phone number that
+    doesn't resolve to a known, linked identity before it ever reaches
+    `gate_service.check_and_charge`. The raw payload is logged to
+    `core.webhook_log` unconditionally — even a malformed payload, a
+    rejected signature, or an unhandled downstream error still gets a row,
     which is the whole point: it's what makes debugging real Meta traffic
     possible without SSH-ing into the server to read logs."""
-    payload = await request.json()
+    raw_body = await request.body()
+    if not verify_signature(
+        settings.whatsapp_cloud_api_app_secret, raw_body, request.headers.get("x-hub-signature-256")
+    ):
+        await webhook_log_service.record(
+            db,
+            room=RoomName.meeting_room,
+            provider=WHATSAPP_PROVIDER_LOG_NAME,
+            direction=WebhookDirection.inbound,
+            raw_payload={"raw": raw_body.decode("utf-8", errors="replace")},
+            status="signature_invalid",
+        )
+        await db.commit()
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid webhook signature")
+
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        payload = {"raw": raw_body.decode("utf-8", errors="replace")}
+
     status_note = "received"
     results: list[dict] = []
     error: Exception | None = None
@@ -83,7 +115,7 @@ async def inbound_webhook(request: Request, db: AsyncSession = Depends(get_db)):
             parsed = whatsapp_provider.parse_webhook(payload)
             for inbound in parsed:
                 try:
-                    message = await services.receive_inbound_message(
+                    result = await orchestrator.receive_inbound_message(
                         db,
                         from_phone=inbound.from_phone,
                         text=inbound.text,
@@ -92,8 +124,8 @@ async def inbound_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                         reply_generator=reply_generator,
                         whatsapp_provider=whatsapp_provider,
                     )
-                    results.append({"status": "processed", "message_id": message.id})
-                except services.Bounced as exc:
+                    results.append({"status": "processed", "identity_id": result.identity_id})
+                except orchestrator.Bounced as exc:
                     results.append({"status": "bounced", "reason": exc.reason})
             status_note = "processed" if results else "no_messages"
     except Exception as exc:  # noqa: BLE001 — the raw payload must still be logged below, then this re-raises
@@ -114,6 +146,18 @@ async def inbound_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     if error is not None:
         raise error
     return {"results": results}
+
+
+@router.post("/admin/sessions/flush")
+async def flush_sessions_now(staff: StaffUser = Depends(admin)):
+    """Flushes every WhatsApp community-agent session with pending same-day
+    turns from Redis into Postgres immediately, instead of waiting for the
+    scheduled end-of-day job (see `app.agents.whatsapp_community.scheduler`).
+    Without this, staff have no way to see "live" same-day conversations in
+    the admin/client conversation viewer or in session reports until
+    midnight — both read Postgres `Message` rows, which don't exist for
+    today's turns until a flush happens."""
+    return await flush_all_sessions()
 
 
 # --- WhatsApp links ---
@@ -139,7 +183,30 @@ async def create_link(
 
 @router.get("/conversations", response_model=list[schemas.ConversationOut])
 async def list_conversations(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
-    return await services.list_conversations(db)
+    """Admin conversation viewer (Meeting Room -> Chat tab), for verifying
+    the WhatsApp auto-reply pipeline actually works. identity_name is
+    resolved here rather than in the service layer — it's presentation
+    detail specific to this listing, not part of Conversation itself."""
+    conversations = await services.list_conversations(db)
+    identity_ids = {c.identity_id for c in conversations}
+    names: dict[str, str] = {}
+    if identity_ids:
+        result = await db.execute(select(Identity.id, Identity.name).where(Identity.id.in_(identity_ids)))
+        names = dict(result.all())
+    return [
+        schemas.ConversationOut(
+            id=c.id,
+            identity_id=c.identity_id,
+            identity_name=names.get(c.identity_id, ""),
+            status=c.status.value,
+            target_language=c.target_language,
+            tone=c.tone,
+            character_name=c.character_name,
+            character_role=c.character_role,
+            updated_at=c.updated_at,
+        )
+        for c in conversations
+    ]
 
 
 @router.get("/conversations/{conversation_id}", response_model=schemas.ConversationDetailOut)
@@ -148,7 +215,19 @@ async def get_conversation(conversation_id: str, staff: StaffUser = Depends(admi
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     await db.refresh(conversation, attribute_names=["messages"])
-    return conversation
+    identity = await db.get(Identity, conversation.identity_id)
+    return schemas.ConversationDetailOut(
+        id=conversation.id,
+        identity_id=conversation.identity_id,
+        identity_name=identity.name if identity else "",
+        status=conversation.status.value,
+        target_language=conversation.target_language,
+        tone=conversation.tone,
+        character_name=conversation.character_name,
+        character_role=conversation.character_role,
+        updated_at=conversation.updated_at,
+        messages=[schemas.MessageOut.model_validate(m) for m in conversation.messages],
+    )
 
 
 @router.post("/conversations/{conversation_id}/reply", response_model=schemas.MessageOut)
@@ -416,6 +495,7 @@ async def client_schedule_meeting(
             meeting_kind="community",
             client_id=client.id,
             video_provider=get_video_provider(),
+            whatsapp_provider=get_whatsapp_provider(),
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -559,6 +639,7 @@ async def create_meeting(req: schemas.MeetingCreate, staff: StaffUser = Depends(
             staff_participant_ids=req.staff_participant_ids,
             meeting_kind=req.meeting_kind,
             video_provider=get_video_provider(),
+            whatsapp_provider=get_whatsapp_provider(),
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

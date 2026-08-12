@@ -84,6 +84,16 @@ def _merge_credit_cap(own: Decimal | None, parent_eff: Decimal | None, is_root: 
     return min(own, parent_eff)
 
 
+def _merge_daily_reply_cap(own: int | None, parent_eff: int | None, is_root: bool) -> int | None:
+    if is_root:
+        return own
+    if own is None:
+        return parent_eff
+    if parent_eff is None:
+        return own
+    return min(own, parent_eff)
+
+
 def _merge_config(own: str | None, parent_eff: str | None, is_root: bool, default: str) -> str:
     if own is not None:
         return own
@@ -109,6 +119,9 @@ def _compute_effective(perm: Permission, parent_perm: Permission | None) -> None
     )
 
     perm.effective_credit_cap = _merge_credit_cap(perm.own_credit_cap, p.effective_credit_cap if p else None, is_root)
+    perm.effective_daily_reply_cap = _merge_daily_reply_cap(
+        perm.own_daily_reply_cap, p.effective_daily_reply_cap if p else None, is_root
+    )
 
     perm.effective_reply_role = _merge_config(perm.own_reply_role, p.effective_reply_role if p else None, is_root, ROOT_DEFAULTS["reply_role"])
     perm.effective_reply_tone = _merge_config(perm.own_reply_tone, p.effective_reply_tone if p else None, is_root, ROOT_DEFAULTS["reply_tone"])
@@ -264,7 +277,15 @@ async def create_ilc_group_identity(
 ) -> Identity:
     """Creates an ILC community group under a client org + its
     `IlcGroupProfile` in one call, same pattern as
-    `create_client_org_identity`."""
+    `create_client_org_identity`. Also opens the group for WhatsApp chat
+    (`own_connected`/`own_auto_respond=True`) — every new Identity
+    otherwise inherits `connected=False` (see `ROOT_DEFAULTS`/`_merge_bool`),
+    and the whole point of "an ILC group was registered" is that any
+    member who later joins it (via public registration or
+    `client_create_member`) can talk to the WhatsApp community agent
+    immediately, with no separate manual step. This lives here, not in a
+    caller, so every current and future call site gets the guarantee
+    automatically rather than having to remember to bolt it on."""
     identity = await create_identity(
         db, name=name, id_type=IdentityType.group, parent_id=parent_id, actor_type=actor_type, actor_id=actor_id
     )
@@ -287,6 +308,9 @@ async def create_ilc_group_identity(
         )
     )
     await db.flush()
+    await update_own_permission(
+        db, identity.id, actor_type=actor_type, actor_id=actor_id, own_connected=True, own_auto_respond=True
+    )
     return identity
 
 

@@ -8,6 +8,11 @@ export default function ChatView() {
   const [replyText, setReplyText] = useState('')
   const [simForm, setSimForm] = useState({ from: '', text: '' })
   const [error, setError] = useState('')
+  const [searchTerm, setSearchTerm] = useState('')
+
+  const visibleConversations = conversations.filter((c) =>
+    (c.identity_name || c.identity_id).toLowerCase().includes(searchTerm.toLowerCase()),
+  )
 
   async function refreshList() {
     setConversations(await listConversations())
@@ -47,7 +52,13 @@ export default function ChatView() {
     <div style={{ display: 'flex', gap: 16 }}>
       <div className="card" style={{ width: 260, padding: 12, flexShrink: 0 }}>
         <div style={{ fontWeight: 700, marginBottom: 8, fontSize: 12 }}>Conversations</div>
-        {conversations.map((c) => (
+        <input
+          placeholder="Search by name…"
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          style={{ ...smallInput, marginBottom: 8 }}
+        />
+        {visibleConversations.map((c) => (
           <div
             key={c.id}
             onClick={() => setSelectedId(c.id)}
@@ -59,10 +70,13 @@ export default function ChatView() {
               background: selectedId === c.id ? 'var(--slate-bg)' : 'transparent',
             }}
           >
-            {c.identity_id.slice(0, 8)}… <span style={{ color: 'var(--sub)' }}>{c.status}</span>
+            {c.identity_name || `${c.identity_id.slice(0, 8)}…`} <span style={{ color: 'var(--sub)' }}>{c.status}</span>
           </div>
         ))}
         {conversations.length === 0 && <div style={{ color: 'var(--sub)', fontSize: 12 }}>No conversations yet.</div>}
+        {conversations.length > 0 && visibleConversations.length === 0 && (
+          <div style={{ color: 'var(--sub)', fontSize: 12 }}>No conversations match "{searchTerm}".</div>
+        )}
 
         <form onSubmit={handleSimulate} className="card" style={{ padding: 10, marginTop: 14 }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--sub)', marginBottom: 6 }}>

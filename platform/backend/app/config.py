@@ -124,6 +124,24 @@ class Settings(BaseSettings):
     live_translation_default_target_language: str = "en"
     live_translation_allowed_languages: str = "en,hi,ta,si"
 
+    # WhatsApp community agent session cache (app/agents/whatsapp_community).
+    # Redis holds same-day conversation turns + per-day counters; Postgres
+    # only gets written at end-of-day flush (or via the admin flush route).
+    # The 1500-token cap and the daily-reply-cap counter both reset at the
+    # same UTC-midnight boundary as the EOD flush cron below — one time
+    # semantic instead of three independent rolling windows.
+    redis_url: str = "redis://localhost:6379/0"
+    whatsapp_session_token_cap: int = 1500
+    eod_flush_hour_utc: int = 0
+    eod_flush_minute_utc: int = 10
+
+    # General API rate limiting (slowapi, Redis-backed — see app/core/rate_limit.py).
+    # The webhook gets its own stricter limit since it's the one unauthenticated
+    # route in the app; rate_limit_enabled is turned off in tests via conftest.
+    rate_limit_enabled: bool = True
+    rate_limit_default: str = "60/minute"
+    rate_limit_webhook: str = "120/minute"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

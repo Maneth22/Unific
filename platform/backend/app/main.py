@@ -7,12 +7,17 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.accounts.router import router as accounts_router
 from app.accounts.whatsapp_router import router as whatsapp_router
+from app.agents.whatsapp_community.scheduler import start_scheduler
 from app.auth.router import router as staff_auth_router
 from app.config import settings
 from app.core.providers.factory import get_video_provider
+from app.core.rate_limit import limiter
 from app.meeting_room.router import client_router as meeting_room_client_router
 from app.meeting_room.router import public_router as meeting_room_public_router
 from app.meeting_room.router import router as meeting_room_router
@@ -30,7 +35,9 @@ async def lifespan(_: FastAPI):
     # Forces the video-provider misconfiguration warnings (see factory.py) to
     # fire in deploy logs at boot, rather than lazily on the first meeting join.
     get_video_provider()
+    scheduler = start_scheduler()
     yield
+    scheduler.shutdown()
 
 
 app = FastAPI(
@@ -40,7 +47,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,

@@ -1,7 +1,10 @@
 """The real (Gemini-backed) comms agent — the prototype's four comms-room
 agents plus the new satisfaction analysis, all running the templates in
 `comms_prompts.py`. Every call records its token usage against the
-identity whose conversation triggered it.
+identity whose conversation triggered it, both for the AI Usage dashboard
+(`llm_usage_service`) and against that identity's 1.5k-token same-day
+session cap (`session_store`) — one hook covers both, rather than
+threading a token-count parameter through every CommsAgent method.
 """
 from __future__ import annotations
 
@@ -11,9 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
+from app.agents.whatsapp_community import session_store
+from app.agents.whatsapp_community.providers import comms_prompts
 from app.config import settings
 from app.core.models.common import RoomName
-from app.core.providers import comms_prompts
 from app.core.providers.base import CommsAgent, InboundClarification, OutboundTranslation, ProviderError
 from app.core.providers.gemini_client import GeminiResult, generate, parse_json_block
 from app.core.services import llm_usage_service
@@ -51,6 +55,8 @@ class GeminiCommsAgent(CommsAgent):
             total_tokens=result.total_tokens,
             estimated_cost=result.estimated_cost,
         )
+        if identity_id is not None:
+            await session_store.incr_token_usage(identity_id, result.total_tokens or 0)
         parsed = parse_json_block(result.text)
         if parsed is None:
             logger.warning(

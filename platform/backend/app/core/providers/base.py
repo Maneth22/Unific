@@ -113,8 +113,8 @@ class ReplyGenerator(ABC):
         approved_for_auto_reply=True) — organization-provided reference
         material the implementation may use when relevant, not a hard
         boundary on what it's allowed to say. `chat_history` (formatted by
-        `app.meeting_room.services._build_chat_history`) is the recent
-        conversation so far, letting a real implementation hold a
+        `app.agents.whatsapp_community.orchestrator._build_chat_history`)
+        is the recent conversation so far, letting a real implementation hold a
         conversational, session-aware exchange rather than answering each
         message in isolation."""
 

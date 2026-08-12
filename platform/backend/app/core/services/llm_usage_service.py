@@ -1,8 +1,9 @@
 """Records and summarizes LLM provider usage. The single write path
 (`record_usage`) is called from inside each Gemini provider implementation
-after a call completes — see `app.core.providers.gemini_reply_generator`
-and `gemini_translation_provider`. Mock/stub providers never call this,
-so usage stats only ever reflect real LLM spend.
+after a call completes — see `app.agents.whatsapp_community.providers.
+gemini_reply_generator` and `app.core.providers.gemini_translation_provider`.
+Mock/stub providers never call this, so usage stats only ever reflect real
+LLM spend.
 """
 from __future__ import annotations
 

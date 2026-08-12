@@ -104,6 +104,12 @@ class Permission(Base):
     own_can_message_scope: Mapped[PermissionScope | None] = mapped_column(Enum(PermissionScope, name="permission_scope"), nullable=True)
     own_can_receive_scope: Mapped[PermissionScope | None] = mapped_column(Enum(PermissionScope, name="permission_scope"), nullable=True)
     own_credit_cap: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    # Max WhatsApp auto-replies this identity may receive per calendar
+    # day (UTC) — null = unlimited. Same narrowing-inheritance shape as
+    # own_credit_cap above; enforced in
+    # app.agents.whatsapp_community.orchestrator.receive_inbound_message,
+    # not here (Permission only stores the setting).
+    own_daily_reply_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     own_reply_role: Mapped[str | None] = mapped_column(String(100), nullable=True)
     own_reply_tone: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -124,6 +130,7 @@ class Permission(Base):
         Enum(PermissionScope, name="permission_scope"), nullable=False, default=PermissionScope.within_tree
     )
     effective_credit_cap: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    effective_daily_reply_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     effective_reply_role: Mapped[str] = mapped_column(String(100), nullable=False, default="member")
     effective_reply_tone: Mapped[str] = mapped_column(String(100), nullable=False, default="friendly")
     effective_reply_complexity: Mapped[str] = mapped_column(String(100), nullable=False, default="standard")
