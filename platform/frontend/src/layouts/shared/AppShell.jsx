@@ -1,28 +1,18 @@
 import React, { useEffect, useRef } from 'react'
 import { NavLink } from 'react-router-dom'
 import { useCollapsibleSidebar } from './useCollapsibleSidebar'
-
-// Active/inactive NavLink styling — lifted verbatim from the nav links
-// that used to be duplicated across the three *Layout.jsx files.
-function navLinkStyle({ isActive }) {
-  return {
-    padding: '9px 10px',
-    borderRadius: 8,
-    fontSize: 13,
-    fontWeight: 600,
-    textDecoration: 'none',
-    color: isActive ? 'white' : 'var(--ink)',
-    background: isActive ? 'var(--slate)' : 'transparent',
-  }
-}
+import Topbar from './Topbar.jsx'
 
 // Shared shell for the three sidebar layouts (staff admin, staff portal,
 // client portal). Handles the collapsible-sidebar / responsive-drawer
 // chrome; brand, nav items, and footer content stay data supplied by
 // each caller so auth wiring stays in the individual layout files.
 //
-// navItems: { key, to, label, end?, dividerBefore? }[]
-export default function AppShell({ brand, navItems, footer, children }) {
+// navItems: { key, to, label, end?, dividerBefore?, icon? }[]
+// topbarUser: { name, subtitle } | undefined — omit to render no Topbar
+// (used by layouts that don't want one; today all three sidebar layouts
+// pass it).
+export default function AppShell({ brand, navItems, footer, children, topbarUser, onLogout }) {
   const { mode, collapsed, mobileOpen, toggleCollapsed, openMobile, closeMobile } =
     useCollapsibleSidebar()
   const asideRef = useRef(null)
@@ -111,12 +101,15 @@ export default function AppShell({ brand, navItems, footer, children }) {
               to={item.to}
               end={item.end}
               onClick={() => mode === 'mobile' && closeMobile()}
-              style={(state) => ({
-                ...navLinkStyle(state),
-                ...(item.dividerBefore ? { marginTop: 10 } : {}),
-              })}
+              className={({ isActive }) => `app-nav-link${isActive ? ' app-nav-link--active' : ''}`}
+              style={item.dividerBefore ? { marginTop: 10 } : undefined}
             >
-              {item.label}
+              {item.icon && (
+                <span className="app-nav-icon">
+                  <item.icon size={16} />
+                </span>
+              )}
+              <span>{item.label}</span>
             </NavLink>
           ))}
         </nav>
@@ -134,7 +127,10 @@ export default function AppShell({ brand, navItems, footer, children }) {
         )}
       </aside>
 
-      <main className="app-main">{children}</main>
+      <main className="app-main">
+        {topbarUser && <Topbar user={topbarUser} onLogout={onLogout} />}
+        {children}
+      </main>
     </div>
   )
 }

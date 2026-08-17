@@ -2,7 +2,7 @@
 flush. `AsyncIOScheduler`, not Celery — this app has zero broker/worker
 infrastructure today (no Redis-as-broker, no Celery beat), and the one
 existing precedent for background async work in this codebase
-(`app.meeting_room.live_translation`) already runs in-process via
+(`app.meeting_room.live_agents`) already runs in-process via
 `asyncio.create_task` rather than a separate deploy artifact. Wired into
 `app.main`'s `lifespan()`, right where `get_video_provider()` warmup runs.
 

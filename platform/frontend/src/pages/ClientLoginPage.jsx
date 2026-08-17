@@ -1,6 +1,15 @@
 import React, { useState } from 'react'
 import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 import { useClientAuth } from '../context/ClientAuthContext'
+import AuthSplitScreen from '../layouts/shared/AuthSplitScreen.jsx'
+import Card from '../components/ui/Card.jsx'
+import Input from '../components/ui/Input.jsx'
+import Button from '../components/ui/Button.jsx'
+
+const ACTOR_TYPES = [
+  { value: 'owner', label: 'Org owner' },
+  { value: 'staff', label: 'Staff member' },
+]
 
 export default function ClientLoginPage() {
   const { isAuthenticated, login } = useClientAuth()
@@ -30,57 +39,55 @@ export default function ClientLoginPage() {
   }
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <form onSubmit={handleSubmit} className="card" style={{ width: 340, padding: 28 }}>
+    <AuthSplitScreen
+      heading="Accountable technology for community-led development"
+      subheading="UNIFIC gives organisations and the communities they serve one shared, verifiable platform for accounts, identity, and communication."
+    >
+      <Card className="auth-split-form-card">
         <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 4 }}>UNIFIC</div>
         <div style={{ color: 'var(--sub)', fontSize: 13, marginBottom: 20 }}>Your account dashboard</div>
 
-        <div style={{ display: 'flex', gap: 6, marginBottom: 16, border: '1px solid var(--line)', borderRadius: 8, padding: 3 }}>
-          {[{ value: 'owner', label: 'Org owner' }, { value: 'staff', label: 'Staff member' }].map((opt) => (
+        <div className="ui-segmented" style={{ width: '100%', marginBottom: 16 }}>
+          {ACTOR_TYPES.map((opt) => (
             <button
               key={opt.value}
               type="button"
               onClick={() => setActorType(opt.value)}
-              style={{
-                flex: 1, border: 'none', borderRadius: 6, padding: '7px 0', fontSize: 12, fontWeight: 700, cursor: 'pointer',
-                background: actorType === opt.value ? 'var(--token)' : 'transparent',
-                color: actorType === opt.value ? 'white' : 'var(--sub)',
-              }}
+              className={`ui-segmented-btn${actorType === opt.value ? ' ui-segmented-btn--active' : ''}`}
+              style={{ flex: 1 }}
             >
               {opt.label}
             </button>
           ))}
         </div>
 
-        <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 4 }}>Email</label>
-        <input
-          type="email"
-          required
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          style={{ width: '100%', padding: '8px 10px', marginBottom: 14, border: '1px solid var(--line)', borderRadius: 8 }}
-        />
-
-        <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 4 }}>Password</label>
-        <input
-          type="password"
-          required
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          style={{ width: '100%', padding: '8px 10px', marginBottom: 16, border: '1px solid var(--line)', borderRadius: 8 }}
-        />
-
-        {!error && idleSignOut && (
-          <div className="badge badge-pending" style={{ display: 'block', marginBottom: 14 }}>
-            You were signed out due to inactivity.
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 14 }}>
+            <Input label="Email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
           </div>
-        )}
 
-        {error && <div className="badge badge-alert" style={{ display: 'block', marginBottom: 14 }}>{error}</div>}
+          <div style={{ marginBottom: 16 }}>
+            <Input
+              label="Password"
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
 
-        <button type="submit" className="btn btn-primary" style={{ width: '100%' }} disabled={submitting}>
-          {submitting ? 'Signing in…' : 'Sign in'}
-        </button>
+          {!error && idleSignOut && (
+            <div className="badge badge-pending" style={{ display: 'block', marginBottom: 14 }}>
+              You were signed out due to inactivity.
+            </div>
+          )}
+
+          {error && <div className="badge badge-alert" style={{ display: 'block', marginBottom: 14 }}>{error}</div>}
+
+          <Button type="submit" variant="primary" loading={submitting} style={{ width: '100%' }}>
+            {submitting ? 'Signing in…' : 'Sign in'}
+          </Button>
+        </form>
 
         <div style={{ textAlign: 'center', marginTop: 14, fontSize: 12 }}>
           <Link to="/client/signup">Don't have an account? Register your organisation</Link>
@@ -91,7 +98,7 @@ export default function ClientLoginPage() {
         <div style={{ textAlign: 'center', marginTop: 8, fontSize: 12 }}>
           <Link to="/">← Back to home</Link>
         </div>
-      </form>
-    </div>
+      </Card>
+    </AuthSplitScreen>
   )
 }

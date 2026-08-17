@@ -44,11 +44,13 @@ class LiveKitVideoProvider(VideoProvider):
                     can_publish=True,
                     can_subscribe=True,
                     can_publish_data=True,
-                    # Lets the frontend broadcast the participant's spoken/
-                    # listening language via localParticipant.setAttributes
-                    # ({language: ...}) — read by live_translation.py's
-                    # per-speaker skip logic and by SelectiveAudioRenderer
-                    # on other participants' clients.
+                    # Lets the frontend broadcast this participant's
+                    # spoken_language/caption_language/audio_mode/
+                    # chat_language attributes via localParticipant.
+                    # setAttributes({...}) — read by live_agents/
+                    # orchestrator.py's per-speaker STT/dubbing/chat
+                    # routing and by SelectiveAudioRenderer/ChatPanel on
+                    # other participants' clients.
                     can_update_own_metadata=True,
                 )
             )

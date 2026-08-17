@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { joinMeeting, listMyMeetings } from '../api/meetingRoom'
+import { getMyStaffMeetingChat, joinMeeting, listMyMeetings } from '../api/meetingRoom'
 import VideoCallRoom from '../components/VideoCallRoom'
 
 const STATUS_BADGE = {
@@ -48,7 +48,14 @@ export default function StaffMeetingsPage() {
     return (
       <div>
         <button className="btn" style={{ marginBottom: 12 }} onClick={() => setCall(null)}>&larr; Leave call</button>
-        <VideoCallRoom serverUrl={call.livekit_url} token={call.token} onDisconnected={() => setCall(null)} />
+        <VideoCallRoom
+          serverUrl={call.livekit_url}
+          token={call.token}
+          languages={call.languages}
+          openInviteUrl={call.open_invite_url}
+          onDisconnected={() => setCall(null)}
+          fetchChatHistory={() => getMyStaffMeetingChat(call.meeting_id)}
+        />
       </div>
     )
   }

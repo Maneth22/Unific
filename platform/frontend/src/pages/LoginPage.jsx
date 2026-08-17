@@ -1,6 +1,10 @@
 import React, { useState } from 'react'
 import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+import AuthSplitScreen from '../layouts/shared/AuthSplitScreen.jsx'
+import Card from '../components/ui/Card.jsx'
+import Input from '../components/ui/Input.jsx'
+import Button from '../components/ui/Button.jsx'
 
 // Where a signed-in staff account lands with no more specific destination
 // (no `location.state.from`, i.e. they came straight here rather than
@@ -45,69 +49,55 @@ export default function LoginPage() {
   }
 
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-      }}
+    <AuthSplitScreen
+      heading="Welcome back!"
+      subheading="Sign in to your UNIFIC account to manage accounts, profiles, and meetings."
     >
-      <form onSubmit={handleSubmit} className="card" style={{ width: 340, padding: 28 }}>
+      <Card className="auth-split-form-card">
         <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 4 }}>UNIFIC Platform</div>
         <div style={{ color: 'var(--sub)', fontSize: 13, marginBottom: 20 }}>
           Staff &amp; supporter sign in
         </div>
 
-        <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 4 }}>
-          Email
-        </label>
-        <input
-          type="email"
-          required
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          style={{
-            width: '100%',
-            padding: '8px 10px',
-            marginBottom: 14,
-            border: '1px solid var(--line)',
-            borderRadius: 8,
-          }}
-        />
-
-        <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 4 }}>
-          Password
-        </label>
-        <input
-          type="password"
-          required
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          style={{
-            width: '100%',
-            padding: '8px 10px',
-            marginBottom: 16,
-            border: '1px solid var(--line)',
-            borderRadius: 8,
-          }}
-        />
-
-        {!error && idleSignOut && (
-          <div className="badge badge-pending" style={{ display: 'block', marginBottom: 14 }}>
-            You were signed out due to inactivity.
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 14 }}>
+            <Input
+              label="Email"
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+            />
           </div>
-        )}
 
-        {error && (
-          <div className="badge badge-alert" style={{ display: 'block', marginBottom: 14 }}>
-            {error}
+          <div style={{ marginBottom: 16 }}>
+            <Input
+              label="Password"
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter your password"
+            />
           </div>
-        )}
 
-        <button type="submit" className="btn btn-primary" style={{ width: '100%' }} disabled={submitting}>
-          {submitting ? 'Signing in…' : 'Sign in'}
-        </button>
+          {!error && idleSignOut && (
+            <div className="badge badge-pending" style={{ display: 'block', marginBottom: 14 }}>
+              You were signed out due to inactivity.
+            </div>
+          )}
+
+          {error && (
+            <div className="badge badge-alert" style={{ display: 'block', marginBottom: 14 }}>
+              {error}
+            </div>
+          )}
+
+          <Button type="submit" variant="primary" loading={submitting} style={{ width: '100%' }}>
+            {submitting ? 'Signing in…' : 'Sign in'}
+          </Button>
+        </form>
 
         <div style={{ textAlign: 'center', marginTop: 14, fontSize: 12 }}>
           <Link to="/login">Client, not staff? Sign in here</Link>
@@ -115,7 +105,7 @@ export default function LoginPage() {
         <div style={{ textAlign: 'center', marginTop: 8, fontSize: 12 }}>
           <Link to="/">← Back to home</Link>
         </div>
-      </form>
-    </div>
+      </Card>
+    </AuthSplitScreen>
   )
 }

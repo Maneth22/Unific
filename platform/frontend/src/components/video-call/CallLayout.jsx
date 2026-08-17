@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react'
 import { RoomEvent, Track } from 'livekit-client'
 import {
   CarouselLayout,
-  Chat,
   FocusLayout,
   FocusLayoutContainer,
   GridLayout,
@@ -17,9 +16,11 @@ import {
 } from '@livekit/components-react'
 import ParticipantTileBody from './ParticipantTileBody'
 import CallControlBar from './CallControlBar'
+import CaptionBar from './CaptionBar'
+import ChatPanel from './ChatPanel'
 import SelectiveAudioRenderer from './SelectiveAudioRenderer'
 import TranslationIndicator from './TranslationIndicator'
-import { SPEAKER_FOCUS_PARTICIPANT_THRESHOLD, TRANSLATOR_IDENTITY_PREFIX, sameTrackRef } from './callConstants'
+import { AUDIO_MODE_CAPTIONS_ONLY, LIVE_AGENTS_BOT_IDENTITY, SPEAKER_FOCUS_PARTICIPANT_THRESHOLD, sameTrackRef } from './callConstants'
 
 // Replaces LiveKit's <VideoConference/> prefab with the same building blocks
 // it uses internally (useTracks/GridLayout/FocusLayoutContainer/
@@ -27,19 +28,33 @@ import { SPEAKER_FOCUS_PARTICIPANT_THRESHOLD, TRANSLATOR_IDENTITY_PREFIX, sameTr
 // subscription and pin/focus machinery while controlling the visuals
 // (ParticipantTileBody) and adding a second auto-focus source: the active
 // speaker, once the call gets crowded (see the second effect below).
-export default function CallLayout({ deviceErrors }) {
-  const [widgetState, setWidgetState] = useState({ showChat: false, unreadMessages: 0 })
-  const [preferredLanguage, setPreferredLanguage] = useState('en')
+export default function CallLayout({ deviceErrors, languages = ['en'], openInviteUrl, fetchChatHistory }) {
+  const [showChat, setShowChat] = useState(false)
+  // Four distinct settings where the old design had one overloaded
+  // `preferredLanguage` — see CallControlBar.jsx's own comment for why.
+  // chatLanguage starts unset (null) so its attribute isn't broadcast at
+  // all until the reader explicitly diverges it from captionLanguage;
+  // everywhere else in this component that needs "my chat language"
+  // effectively reads chatLanguage ?? captionLanguage, matching the
+  // backend's own default rule.
+  const [callSettings, setCallSettings] = useState({
+    spokenLanguage: languages[0] || 'en',
+    captionLanguage: languages[0] || 'en',
+    audioMode: AUDIO_MODE_CAPTIONS_ONLY,
+    chatLanguage: null,
+  })
+  const updateCallSetting = (key, value) => setCallSettings((s) => ({ ...s, [key]: value }))
+  const effectiveChatLanguage = callSettings.chatLanguage || callSettings.captionLanguage
+
   const lastAutoFocusedScreenShareTrack = useRef(null)
   const lastAutoFocusedSpeakerIdentity = useRef(null)
 
-  // Four separate translator bots (one per language, see
-  // live_translation.py) each join the room as their own participant, but
-  // they're an implementation detail, not people on the call — without
-  // filtering, each would get its own camera-off placeholder tile here
-  // (withPlaceholder: true gives every camera-less participant one),
-  // cluttering the grid with 4 silent "XX Translator" tiles. Excluded here
-  // at the source so every derived list (screen share, carousel, the
+  // The backend's one live_agents bot identity (dubbed-audio tracks,
+  // captions, chat relay) is an implementation detail, not a person on the
+  // call — without filtering, it would get its own camera-off placeholder
+  // tile here (withPlaceholder: true gives every camera-less participant
+  // one), cluttering the grid with a silent tile. Excluded here at the
+  // source so every derived list (screen share, carousel, the
   // crowd-threshold count) stays clean automatically; TranslationIndicator
   // below shows one single "translation active" signal instead.
   const tracks = useTracks(
@@ -48,11 +63,11 @@ export default function CallLayout({ deviceErrors }) {
       { source: Track.Source.ScreenShare, withPlaceholder: false },
     ],
     { updateOnlyOn: [RoomEvent.ActiveSpeakersChanged], onlySubscribed: false },
-  ).filter((track) => !track.participant.identity.startsWith(TRANSLATOR_IDENTITY_PREFIX))
+  ).filter((track) => track.participant.identity !== LIVE_AGENTS_BOT_IDENTITY)
 
   const layoutContext = useCreateLayoutContext()
   const speakingParticipants = useSpeakingParticipants()
-  const translationActive = useParticipants().some((p) => p.identity.startsWith(TRANSLATOR_IDENTITY_PREFIX))
+  const translationActive = useParticipants().some((p) => p.identity === LIVE_AGENTS_BOT_IDENTITY)
 
   const screenShareTracks = tracks
     .filter(isTrackReference)
@@ -144,7 +159,8 @@ export default function CallLayout({ deviceErrors }) {
   return (
     <div className="lk-video-conference cq-call-shell">
       <TranslationIndicator active={translationActive} />
-      <LayoutContextProvider value={layoutContext} onWidgetChange={setWidgetState}>
+      <CaptionBar captionLanguage={callSettings.captionLanguage} />
+      <LayoutContextProvider value={layoutContext}>
         <div className="lk-video-conference-inner">
           {!focusTrack ? (
             <div className="lk-grid-layout-wrapper">
@@ -170,13 +186,19 @@ export default function CallLayout({ deviceErrors }) {
           )}
           <CallControlBar
             deviceErrors={deviceErrors}
-            preferredLanguage={preferredLanguage}
-            setPreferredLanguage={setPreferredLanguage}
+            callSettings={callSettings}
+            updateCallSetting={updateCallSetting}
+            availableLanguages={languages}
+            openInviteUrl={openInviteUrl}
+            showChat={showChat}
+            onToggleChat={() => setShowChat((v) => !v)}
           />
         </div>
-        <Chat style={{ display: widgetState.showChat ? 'grid' : 'none' }} />
+        <div style={{ display: showChat ? 'grid' : 'none' }}>
+          <ChatPanel chatLanguage={effectiveChatLanguage} fetchChatHistory={fetchChatHistory} />
+        </div>
       </LayoutContextProvider>
-      <SelectiveAudioRenderer preferredLanguage={preferredLanguage} />
+      <SelectiveAudioRenderer captionLanguage={callSettings.captionLanguage} audioMode={callSettings.audioMode} />
     </div>
   )
 }

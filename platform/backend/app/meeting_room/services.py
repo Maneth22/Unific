@@ -23,12 +23,14 @@ from app.core.models.audit import ActorType
 from app.core.models.common import RoomName, utcnow, uuid_str
 from app.core.providers.base import CommsAgent, ProviderError, VideoProvider, WhatsAppProvider
 from app.core.services import audit_service, calendar_service, spend_service
-from app.meeting_room import live_translation
+from app.meeting_room import live_agents
 from app.meeting_room.models import (
     Conversation,
     ConversationStatus,
     Meeting,
+    MeetingChatMessage,
     MeetingInvite,
+    MeetingInviteKind,
     MeetingParticipant,
     Message,
     MessageDirection,
@@ -415,6 +417,15 @@ async def get_conversation_with_messages(db: AsyncSession, conversation_id: str)
 _JOINABLE_STATUSES = (MeetingStatus.scheduled, MeetingStatus.live)
 
 
+def build_invite_url(token: str) -> str:
+    """The one place this URL shape is built — every meeting-invite link
+    (WhatsApp notification text, and every invite_url/open_invite_url
+    returned to the frontend from router.py) goes through this, so there's
+    a single source of truth for the join-link shape rather than the
+    router and this module each re-deriving it independently."""
+    return f"{settings.frontend_base_url.rstrip('/')}/meeting-room/join/{token}"
+
+
 async def _send_whatsapp_meeting_invites(
     db: AsyncSession,
     pending_invites: list[tuple[str, MeetingInvite]],
@@ -440,7 +451,7 @@ async def _send_whatsapp_meeting_invites(
         phone_number = phone_by_identity.get(identity_id)
         if not phone_number:
             continue  # e.g. a group/org-root host — nothing to send to
-        url = f"{settings.frontend_base_url.rstrip('/')}/meeting-room/join/{invite.token}"
+        url = build_invite_url(invite.token)
         text = f"You've been invited to a meeting on {scheduled_at.strftime('%b %d, %Y at %H:%M UTC')}. Join here: {url}"
         try:
             await whatsapp_provider.send_message(phone_number, text)
@@ -449,12 +460,61 @@ async def _send_whatsapp_meeting_invites(
             logger.warning("Failed to send WhatsApp meeting invite identity=%s", identity_id)
 
 
+async def _assert_client_org_only(db: AsyncSession, identity_ids: set[str]) -> None:
+    """Shared by `schedule_meeting` (checking every identity in the batch
+    being scheduled) and `add_participant` (checking just the one identity
+    being added later) — every identity in `identity_ids` must be a
+    client-org root (have a `ClientOrgProfile`), never an ILC/community
+    identity. No-ops on an empty set (e.g. a "staff" meeting_kind with no
+    identity participants at all)."""
+    if not identity_ids:
+        return
+    result = await db.execute(
+        select(ClientOrgProfile.identity_id).where(ClientOrgProfile.identity_id.in_(identity_ids))
+    )
+    org_identity_ids = {row[0] for row in result.all()}
+    if org_identity_ids != identity_ids:
+        raise MeetingRoomError(
+            "A client meeting can only include client organizations, never an ILC/community identity"
+        )
+
+
+async def _create_personal_invite(
+    db: AsyncSession, *, meeting_id: str, identity_id: str, expires_at: datetime
+) -> tuple[MeetingParticipant, MeetingInvite]:
+    """One MeetingParticipant + its personal (kind=personal), single-
+    recipient MeetingInvite — the shape both `schedule_meeting`'s
+    identity-participant loop and `add_participant` need."""
+    participant = MeetingParticipant(meeting_id=meeting_id, identity_id=identity_id)
+    db.add(participant)
+    await db.flush()
+    invite = MeetingInvite(
+        meeting_id=meeting_id, participant_id=participant.id, kind=MeetingInviteKind.personal, expires_at=expires_at
+    )
+    db.add(invite)
+    await db.flush()
+    return participant, invite
+
+
+async def _create_open_invite(db: AsyncSession, *, meeting_id: str, expires_at: datetime) -> MeetingInvite:
+    """The one shareable, meeting-wide invite (kind=open, no
+    participant_id) — created eagerly at schedule time so both scheduler
+    UIs can show a "copy guest link" immediately, rather than lazily on
+    first request (which would need a read-then-maybe-create branch
+    everywhere the link is displayed)."""
+    invite = MeetingInvite(meeting_id=meeting_id, participant_id=None, kind=MeetingInviteKind.open, expires_at=expires_at)
+    db.add(invite)
+    await db.flush()
+    return invite
+
+
 async def schedule_meeting(
     db: AsyncSession,
     *,
     host_identity_id: str,
     scheduled_at: datetime,
     translate_live: bool,
+    translate_languages: list[str],
     staff_id: str | None = None,
     client_id: str | None = None,
     notes: str = "",
@@ -464,17 +524,21 @@ async def schedule_meeting(
     video_provider: VideoProvider,
     whatsapp_provider: WhatsAppProvider,
 ) -> Meeting:
-    """Creates the meeting row, its LiveKit room, and a MeetingParticipant
-    (+ MeetingInvite, for identity-side participants) for the host, the
-    scheduling staff member, and everyone else listed. A room-creation
-    failure aborts scheduling entirely — unlike the comms pipeline's
-    degrade-gracefully philosophy, a meeting with no room is useless.
+    """Creates the meeting row, its LiveKit room, a MeetingParticipant (+
+    personal MeetingInvite, for identity-side participants) for the host,
+    the scheduling staff member, and everyone else listed, plus the
+    meeting's one open/shareable invite. A room-creation failure aborts
+    scheduling entirely — unlike the comms pipeline's degrade-gracefully
+    philosophy, a meeting with no room is useless.
 
     `meeting_kind="client_org"` is the admin "meet with a client" picker —
     every identity participant must be a client-org root (have a
-    `ClientOrgProfile`), never an ILC/community identity. `"staff"` and
-    `"community"` (the default — the client's own meetings with their
-    community, unaffected by this restriction) skip the check.
+    `ClientOrgProfile`), never an ILC/community identity — see
+    `_assert_client_org_only`. `"staff"` and `"community"` (the default —
+    the client's own meetings with their community, unaffected by this
+    restriction) skip the check. `meeting_kind` is persisted onto the
+    `Meeting` row (not just used here) so a later `add_participant` call
+    can re-apply the same restriction.
 
     Exactly one of `staff_id` (an admin scheduling) or `client_id` (a
     client scheduling a meeting for their own community, `meeting_kind=
@@ -485,15 +549,7 @@ async def schedule_meeting(
     actor_id = staff_id or client_id
     if meeting_kind == "client_org":
         all_identity_ids = {host_identity_id, *(participant_identity_ids or [])} - {None}
-        if all_identity_ids:
-            result = await db.execute(
-                select(ClientOrgProfile.identity_id).where(ClientOrgProfile.identity_id.in_(all_identity_ids))
-            )
-            org_identity_ids = {row[0] for row in result.all()}
-            if org_identity_ids != all_identity_ids:
-                raise MeetingRoomError(
-                    "A client meeting can only include client organizations, never an ILC/community identity"
-                )
+        await _assert_client_org_only(db, all_identity_ids)
 
     if scheduled_at.tzinfo is not None:
         # Every datetime column in this app is naive UTC (see
@@ -514,7 +570,9 @@ async def schedule_meeting(
         id=meeting_id,
         host_identity_id=host_identity_id,
         scheduled_at=scheduled_at,
+        meeting_kind=meeting_kind,
         translate_live=translate_live,
+        translate_languages=translate_languages,
         notes=notes,
         created_by=staff_id,
         room_name=room_name,
@@ -535,13 +593,15 @@ async def schedule_meeting(
     # staff_participant_ids loop above in that case.
     pending_invites: list[tuple[str, MeetingInvite]] = []
     for identity_id in {host_identity_id, *(participant_identity_ids or [])} - {None}:
-        participant = MeetingParticipant(meeting_id=meeting.id, identity_id=identity_id)
-        db.add(participant)
-        await db.flush()
-        invite = MeetingInvite(meeting_id=meeting.id, participant_id=participant.id, expires_at=invite_expires_at)
-        db.add(invite)
+        _participant, invite = await _create_personal_invite(
+            db, meeting_id=meeting.id, identity_id=identity_id, expires_at=invite_expires_at
+        )
         pending_invites.append((identity_id, invite))
-    await db.flush()
+
+    # The meeting's one shareable "anyone with this link can join" invite
+    # — created eagerly, not lazily on first request, so both scheduler
+    # UIs can show it immediately (see _create_open_invite).
+    await _create_open_invite(db, meeting_id=meeting.id, expires_at=invite_expires_at)
 
     await _send_whatsapp_meeting_invites(
         db, pending_invites, scheduled_at=scheduled_at, whatsapp_provider=whatsapp_provider
@@ -570,6 +630,76 @@ async def schedule_meeting(
     return meeting
 
 
+async def add_participant(
+    db: AsyncSession,
+    *,
+    meeting_id: str,
+    identity_id: str | None = None,
+    staff_id: str | None = None,
+    actor_type: ActorType,
+    actor_id: str | None,
+    whatsapp_provider: WhatsAppProvider,
+) -> tuple[MeetingParticipant, MeetingInvite | None]:
+    """Adds one more identity or staff participant to an already-scheduled
+    (or already-live) meeting — `schedule_meeting` only covers who's
+    invited at creation time; this is the post-creation equivalent,
+    reusing the same participant/invite shape (`_create_personal_invite`)
+    and the same client-org restriction (`_assert_client_org_only`), now
+    re-derived from the meeting's persisted `meeting_kind` rather than a
+    fresh caller-supplied one. Exactly one of `identity_id`/`staff_id` must
+    be set — validated at the schema layer (router.py), not re-checked
+    here."""
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        raise MeetingRoomError("Meeting not found")
+    _assert_joinable(meeting)
+
+    if identity_id is not None:
+        if meeting.meeting_kind == "client_org":
+            await _assert_client_org_only(db, {identity_id})
+        existing = await db.execute(
+            select(MeetingParticipant).where(
+                MeetingParticipant.meeting_id == meeting_id, MeetingParticipant.identity_id == identity_id
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            raise MeetingRoomError("This person is already a participant on this meeting")
+        invite_expires_at = meeting.scheduled_at + timedelta(hours=settings.meeting_invite_ttl_hours)
+        participant, invite = await _create_personal_invite(
+            db, meeting_id=meeting.id, identity_id=identity_id, expires_at=invite_expires_at
+        )
+        # Best-effort, same as schedule_meeting's own invite send — a
+        # missing/unlinked WhatsApp number or send failure must never
+        # block adding the participant itself.
+        await _send_whatsapp_meeting_invites(
+            db, [(identity_id, invite)], scheduled_at=meeting.scheduled_at, whatsapp_provider=whatsapp_provider
+        )
+    else:
+        existing = await db.execute(
+            select(MeetingParticipant).where(
+                MeetingParticipant.meeting_id == meeting_id, MeetingParticipant.staff_user_id == staff_id
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            raise MeetingRoomError("This person is already a participant on this meeting")
+        participant = MeetingParticipant(meeting_id=meeting_id, staff_user_id=staff_id)
+        db.add(participant)
+        await db.flush()
+        invite = None  # matches schedule_meeting's staff_participant_ids loop — staff never get an invite row
+
+    await audit_service.record(
+        db,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        action="meeting_room.meeting.add_participant",
+        room=RoomName.meeting_room,
+        entity_type="meeting",
+        entity_id=meeting.id,
+        after={"identity_id": identity_id, "staff_user_id": staff_id},
+    )
+    return participant, invite
+
+
 async def list_meetings(db: AsyncSession) -> list[Meeting]:
     result = await db.execute(select(Meeting).order_by(Meeting.scheduled_at))
     return list(result.scalars().all())
@@ -582,9 +712,37 @@ async def get_meeting_with_participants(db: AsyncSession, meeting_id: str) -> Me
     return result.scalar_one_or_none()
 
 
+async def get_meeting_chat_history(db: AsyncSession, meeting_id: str) -> list[MeetingChatMessage]:
+    """The full persisted chat log for one meeting (see
+    `live_agents.chat_relay.ChatRelay`, which writes these rows live).
+    Returns every message's full `translations` dict rather than
+    resolving "the" translation for a specific caller — the client picks
+    out its own `chat_language`, falling back to `original_text` if that
+    language isn't cached on a given row yet (see schemas.ChatMessageOut).
+    No per-caller re-translation happens here; a language a live session
+    never needed simply isn't in `translations` for older messages."""
+    result = await db.execute(
+        select(MeetingChatMessage)
+        .where(MeetingChatMessage.meeting_id == meeting_id)
+        .order_by(MeetingChatMessage.created_at)
+    )
+    return list(result.scalars().all())
+
+
 async def get_invites_for_meeting(db: AsyncSession, meeting_id: str) -> list[MeetingInvite]:
     result = await db.execute(select(MeetingInvite).where(MeetingInvite.meeting_id == meeting_id))
     return list(result.scalars().all())
+
+
+async def get_open_invite(db: AsyncSession, meeting_id: str) -> MeetingInvite | None:
+    """The meeting's one shareable link (see MeetingInviteKind.open) —
+    used by every join endpoint in router.py to include `open_invite_url`
+    in its JoinResponse, so a participant can re-share it from inside a
+    call they joined some other way, not just from the scheduler UI."""
+    result = await db.execute(
+        select(MeetingInvite).where(MeetingInvite.meeting_id == meeting_id, MeetingInvite.kind == MeetingInviteKind.open)
+    )
+    return result.scalar_one_or_none()
 
 
 async def list_staff_meetings(db: AsyncSession, staff_id: str) -> list[Meeting]:
@@ -626,16 +784,28 @@ async def get_invite_by_token(db: AsyncSession, token: str) -> MeetingInvite | N
     return invite
 
 
-async def get_public_join_info(db: AsyncSession, token: str) -> tuple[Meeting, MeetingParticipant, Identity | None] | None:
+async def get_public_join_info(
+    db: AsyncSession, token: str
+) -> tuple[Meeting, MeetingParticipant | None, Identity | None, MeetingInviteKind] | None:
+    """`participant`/`identity` are only populated for a personal
+    (kind=personal) invite — a personal link already knows who's joining.
+    An open (kind=open) invite is meeting-wide and doesn't correspond to
+    any existing participant yet (one is only created on redemption, see
+    `redeem_open_invite`), so both come back `None`; the router's public
+    info response falls back to a generic greeting in that case."""
     invite = await get_invite_by_token(db, token)
     if invite is None:
         return None
-    participant = await db.get(MeetingParticipant, invite.participant_id)
     meeting = await db.get(Meeting, invite.meeting_id)
-    if participant is None or meeting is None:
+    if meeting is None:
+        return None
+    if invite.kind == MeetingInviteKind.open:
+        return meeting, None, None, invite.kind
+    participant = await db.get(MeetingParticipant, invite.participant_id)
+    if participant is None:
         return None
     identity = await db.get(Identity, participant.identity_id) if participant.identity_id else None
-    return meeting, participant, identity
+    return meeting, participant, identity, invite.kind
 
 
 async def _mark_joined(
@@ -651,7 +821,9 @@ async def _mark_joined(
             # a translation-agent startup failure shouldn't block the first
             # participant from actually joining the call.
             try:
-                await live_translation.start_for_meeting(room_name=meeting.room_name, meeting_id=meeting.id)
+                await live_agents.start_for_meeting(
+                    room_name=meeting.room_name, meeting_id=meeting.id, languages=meeting.translate_languages
+                )
             except Exception:
                 logger.exception("failed to start live translation meeting_id=%s", meeting.id)
     await audit_service.record(
@@ -739,13 +911,26 @@ async def mint_client_join(
 
 
 async def mint_public_join(db: AsyncSession, *, token: str, video_provider: VideoProvider) -> tuple[Meeting, str]:
-    """The passwordless join path for a WhatsApp-only community member (or
-    anyone else holding a valid, unexpired, unrevoked invite link) — the
-    token itself is the join credential, no login required."""
+    """The passwordless join path for a personal (kind=personal),
+    single-recipient invite link — used by a WhatsApp-only community
+    member (or anyone else holding that specific, valid, unexpired,
+    unrevoked link). The token itself is the join credential, no login
+    required. See `redeem_open_invite` for the meeting-wide, multi-person
+    open-link equivalent — deliberately a separate function/endpoint
+    rather than a branch in this one, since the two mint LiveKit identities
+    completely differently (one fixed identity here vs. a fresh one per
+    redemption there)."""
     info = await get_public_join_info(db, token)
     if info is None:
         raise MeetingRoomError("This meeting link is invalid or has expired")
-    meeting, participant, identity = info
+    meeting, participant, identity, kind = info
+    # Defense in depth: get_public_join_info already only returns a
+    # non-None participant for kind=personal, but guard explicitly so a
+    # future change to that function can't silently let an open token
+    # through this path (which would mint a token under a *shared* fixed
+    # identity — exactly what open invites exist to avoid).
+    if kind != MeetingInviteKind.personal or participant is None:
+        raise MeetingRoomError("This is not a personal invite link")
     _assert_joinable(meeting)
 
     participant_name = identity.name if identity is not None else "Guest"
@@ -763,6 +948,45 @@ async def mint_public_join(db: AsyncSession, *, token: str, video_provider: Vide
     return meeting, token_jwt
 
 
+async def redeem_open_invite(
+    db: AsyncSession, *, token: str, guest_name: str, video_provider: VideoProvider
+) -> tuple[Meeting, str]:
+    """The open-link join path — see `MeetingInviteKind.open`. Unlike
+    `mint_public_join`, every redemption creates a brand-new guest
+    `MeetingParticipant` (never deduped/reused across redemptions) and
+    mints a fresh, unique LiveKit identity, so many different people can
+    use the same link at the same time without colliding on one shared
+    identity (LiveKit allows only one live connection per identity per
+    room — a fixed identity is exactly what made the old per-participant
+    link unsafe to share broadly)."""
+    invite = await get_invite_by_token(db, token)
+    if invite is None or invite.kind != MeetingInviteKind.open:
+        raise MeetingRoomError("This meeting link is invalid or has expired")
+    meeting = await db.get(Meeting, invite.meeting_id)
+    if meeting is None:
+        raise MeetingRoomError("Meeting not found")
+    _assert_joinable(meeting)
+
+    guest_name = (guest_name or "").strip()[:100] or "Guest"
+    participant = MeetingParticipant(meeting_id=meeting.id, guest_name=guest_name)
+    db.add(participant)
+    await db.flush()
+
+    guest_identity = f"guest:{uuid_str()}"
+    token_jwt = await video_provider.generate_access_token(
+        room_name=meeting.room_name,
+        participant_identity=guest_identity,
+        participant_name=guest_name,
+        ttl_seconds=settings.meeting_token_ttl_minutes * 60,
+    )
+
+    # used_at is deliberately left null here — that field means "this
+    # single-use personal link was consumed" (see mint_public_join), which
+    # doesn't apply to a reusable, meeting-wide open invite.
+    await _mark_joined(db, meeting=meeting, participant=participant, actor_type=ActorType.system, actor_id=None)
+    return meeting, token_jwt
+
+
 async def end_meeting(
     db: AsyncSession,
     *,
@@ -773,7 +997,12 @@ async def end_meeting(
 ) -> Meeting:
     """Exactly one of `staff_id` (admin) or `client_id` (the client closing
     a meeting they scheduled for their own community) identifies the actor
-    for the audit trail."""
+    for the audit trail.
+
+    Deliberately doesn't touch any MeetingInvite row (personal or open) —
+    `_assert_joinable` already rejects every join/redeem path once
+    `status` leaves scheduled/live, so a completed meeting's invites are
+    already unusable without needing explicit revocation too."""
     meeting = await db.get(Meeting, meeting_id)
     if meeting is None:
         raise MeetingRoomError("Meeting not found")
@@ -787,7 +1016,7 @@ async def end_meeting(
         # hinge on the provider's disconnect call succeeding.
         logger.warning("LiveKit room end failed (marking meeting completed regardless): %s", exc)
     try:
-        await live_translation.stop_for_meeting(meeting.id)
+        await live_agents.stop_for_meeting(meeting.id)
     except Exception:
         logger.exception("failed to stop live translation meeting_id=%s", meeting.id)
 
@@ -825,7 +1054,7 @@ async def delete_meeting(db: AsyncSession, *, meeting_id: str, staff_id: str, vi
         # provider call succeeding, but we still want to have tried.
         logger.warning("LiveKit room deletion failed (deleting the meeting record regardless): %s", exc)
     try:
-        await live_translation.stop_for_meeting(meeting.id)
+        await live_agents.stop_for_meeting(meeting.id)
     except Exception:
         logger.exception("failed to stop live translation meeting_id=%s", meeting.id)
 

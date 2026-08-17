@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Link, Outlet } from 'react-router-dom'
+import logo from '../assets/logo.png'
 
 // Simple top-nav marketing layout for the public site (landing/about/
 // contact) — deliberately not built on the sidebar AppShell used for the
@@ -11,7 +12,13 @@ export default function PublicLayout() {
   return (
     <div>
       <header className="public-nav">
-        <Link to="/" className="public-nav-brand" onClick={() => setMobileOpen(false)}>
+        <Link
+          to="/"
+          className="public-nav-brand"
+          onClick={() => setMobileOpen(false)}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+        >
+          <img src={logo} alt="" width={28} height={28} style={{ display: 'block' }} />
           UNIFIC <span style={{ color: 'var(--token)' }}>Platform</span>
         </Link>
 

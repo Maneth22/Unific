@@ -11,6 +11,10 @@ services:
       - "55432:5432"
     volumes:
       - unific_pgdata:/var/lib/postgresql/data
+    # Caps this container so it can't grow unbounded and starve the bare
+    # uvicorn process (which itself hosts the REST API, APScheduler cron,
+    # and every live-translation agent) on a 1vCPU/2GB droplet.
+    mem_limit: 512m
 
   redis:
     image: redis:7-alpine
@@ -20,6 +24,9 @@ services:
       - "6379:6379"
     volumes:
       - unific_redis_data:/data
+    # Small session cache only (WhatsApp same-day turns/counters) — doesn't
+    # need much; same rationale as postgres's mem_limit above.
+    mem_limit: 128m
 
 volumes:
   unific_pgdata:

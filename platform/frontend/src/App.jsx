@@ -35,6 +35,7 @@ import NotFoundPage from './pages/NotFoundPage'
 import AccountsRoomHome from './rooms/accounts/AccountsRoomHome'
 import ProfilesRoomHome from './rooms/profiles/ProfilesRoomHome'
 import MeetingRoomHome from './rooms/meeting-room/MeetingRoomHome'
+import WhatsAppMessagesHome from './rooms/whatsapp-messages/WhatsAppMessagesHome'
 
 // Only one audience's AuthProvider is ever mounted at a time — staff and
 // client share one in-memory access-token slot (api/client.js), which is
@@ -96,6 +97,7 @@ export default function App() {
                 <Route path="/accounts" element={<AccountsRoomHome />} />
                 <Route path="/profiles" element={<ProfilesRoomHome />} />
                 <Route path="/meeting-room" element={<MeetingRoomHome />} />
+                <Route path="/whatsapp-messages" element={<WhatsAppMessagesHome />} />
               </Route>
             </Route>
 

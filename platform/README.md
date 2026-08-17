@@ -360,6 +360,31 @@ python -c "import secrets; print(secrets.token_urlsafe(64))"                    
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # SECRETS_ENCRYPTION_KEY
 ```
 
+### Running on a small droplet (e.g. 1vCPU/2GB)
+
+The backend is one bare `uvicorn` process — REST API, the WhatsApp EOD
+scheduler, and every live meeting's captions/dubbed-audio/chat agent
+(`app/meeting_room/live_agents/`) all share its single event loop. Keep it
+that way: the `_running` registry in `live_agents/orchestrator.py` is
+in-process state, so running multiple uvicorn workers would double-start
+a meeting's agent on every join instead of coordinating across workers.
+One bot identity connects per meeting (not per language, unlike the old
+design), and reacts live to each participant's own
+`spoken_language`/`caption_language`/`audio_mode`/`chat_language`
+attributes rather than pre-starting every possible pipeline. Three
+independent settings bound the real resource costs —
+`LIVE_AGENTS_MAX_CONCURRENT_STT_SESSIONS` (default 8, one per active
+speaker), `LIVE_AGENTS_MAX_CONCURRENT_TTS_PIPELINES` (default 6, one per
+language actually in dubbed-audio demand), and
+`LIVE_AGENTS_MAX_CONCURRENT_TRANSLATE_CALLS` (default 8, stateless Gemini
+text-translate calls) — plus scheduled meetings still choose their own
+`translate_languages` scope (capped at 4, including English) as a UX
+whitelist. `docker-compose.yml`'s `postgres`/`redis` containers carry
+`mem_limit`s for the same small-host reasoning. As extra insurance against
+an OOM spike during a translation burst, add a 2–4GB swap file on the
+droplet itself (`fallocate`/`mkswap`/`swapon`) — a one-time ops step, not
+something this repo configures.
+
 ### First login
 
 There is no self-registration for staff. Bootstrap the first (superadmin)

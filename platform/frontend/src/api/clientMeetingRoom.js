@@ -18,3 +18,11 @@ export const scheduleMyMeeting = (payload) => apiClient.post('/meeting-room/clie
 export const endMyMeeting = (id) => apiClient.post(`/meeting-room/client/meetings/${id}/end`).then((r) => r.data)
 export const joinMyMeeting = (id, identityId) =>
   apiClient.post(`/meeting-room/client/meetings/${id}/join`, identityId ? { identity_id: identityId } : {}).then((r) => r.data)
+// Adds one more identity (from the client's own scope) to an
+// already-scheduled/live meeting.
+export const addMyParticipant = (id, identityId) =>
+  apiClient.post(`/meeting-room/client/meetings/${id}/participants`, { identity_id: identityId }).then((r) => r.data)
+
+// Persisted in-call chat history — see api/meetingRoom.js's getMeetingChat
+// for the shape.
+export const getMyMeetingChat = (id) => apiClient.get(`/meeting-room/client/meetings/${id}/chat`).then((r) => r.data)

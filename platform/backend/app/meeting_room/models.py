@@ -109,7 +109,25 @@ class Meeting(Base):
     # nodes at all. Set for "client_org"/"community" meetings.
     host_identity_id: Mapped[str | None] = mapped_column(ForeignKey("profiles.identity.id", ondelete="CASCADE"), nullable=True, index=True)
     scheduled_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # "staff" | "client_org" | "community" — which scheduler picker created
+    # this meeting; only "client_org" is restricted (client-org-root
+    # identities only, never an ILC/community identity — see
+    # services.schedule_meeting/_assert_client_org_only). Persisted (not
+    # just a schedule_meeting() parameter) so a later add_participant call
+    # can re-apply the same restriction after creation.
+    meeting_kind: Mapped[str] = mapped_column(String(20), default="community", nullable=False)
     translate_live: Mapped[bool] = mapped_column(Boolean, default=True)
+    # A per-meeting UX scope whitelist — which languages the scheduler/join
+    # UI offers for this meeting (chosen at scheduling time, validated
+    # against live_agents.providers.SELECTABLE_LANGUAGES + capped at
+    # schemas.MAX_TRANSLATE_LANGUAGES — see schemas.py). Not otherwise
+    # consulted by live_agents itself: which STT/TTS/translate pipelines
+    # actually run is driven reactively by participants' own
+    # spoken_language/caption_language/audio_mode attributes, not this
+    # list (see live_agents/orchestrator.py). Unused when translate_live
+    # is False. Defaults to English-only for rows that predate this
+    # column (migration server_default).
+    translate_languages: Mapped[list[str]] = mapped_column(JSONB, default=lambda: ["en"])
     status: Mapped[MeetingStatus] = mapped_column(Enum(MeetingStatus, name="meeting_status"), default=MeetingStatus.scheduled)
     notes: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str | None] = mapped_column(ForeignKey("core.staff_user.id", ondelete="SET NULL"), nullable=True)
@@ -139,7 +157,9 @@ class MeetingParticipant(Base):
     __tablename__ = "meeting_participant"
     __table_args__ = (
         CheckConstraint(
-            "(identity_id IS NOT NULL) != (staff_user_id IS NOT NULL)",
+            "(CASE WHEN identity_id IS NOT NULL THEN 1 ELSE 0 END)"
+            " + (CASE WHEN staff_user_id IS NOT NULL THEN 1 ELSE 0 END)"
+            " + (CASE WHEN guest_name IS NOT NULL THEN 1 ELSE 0 END) = 1",
             name="one_actor",
         ),
         Index(
@@ -169,6 +189,11 @@ class MeetingParticipant(Base):
     staff_user_id: Mapped[str | None] = mapped_column(
         ForeignKey("core.staff_user.id", ondelete="CASCADE"), nullable=True
     )
+    # Set only for a guest who joined via the meeting's open invite link
+    # (see MeetingInviteKind.open) — no identity/staff row backs them, just
+    # the name they typed in at join time. Never deduplicated against other
+    # guest rows: every open-link redemption is intentionally its own row.
+    guest_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     joined_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     left_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
@@ -179,25 +204,58 @@ class MeetingParticipant(Base):
     )
 
 
+class MeetingInviteKind(str, enum.Enum):
+    # Tied to exactly one MeetingParticipant (participant_id set) — a
+    # personal, single-recipient link (identity or, historically, could be
+    # extended to staff). Reusable sequentially (used_at is write-only, see
+    # get_invite_by_token) but every redemption mints the SAME fixed
+    # LiveKit identity, so two different people cannot hold the call
+    # concurrently through one personal link.
+    personal = "personal"
+    # Meeting-scoped, not participant-scoped (participant_id is NULL) — the
+    # one shareable "anyone with this link can join" invite per meeting.
+    # Each redemption (services.redeem_open_invite) creates its own new
+    # guest MeetingParticipant and mints a fresh unique LiveKit identity,
+    # so many different people can use it at the same time without
+    # colliding. See uq_meeting_invite_open_per_meeting below.
+    open = "open"
+
+
 class MeetingInvite(Base):
-    """A passwordless, per-participant, time-bound join link — used by
-    WhatsApp-only community members (no dashboard login) and, for
-    convenience, every identity-side participant. Deliberately not a
-    `profiles.GroupInvite` (that model is a durable, one-active-per-
-    identity community registration link with rotate-not-mutate
-    semantics); a meeting invite is single-meeting, single-participant,
-    and expires with the meeting, so it gets its own table rather than
-    overloading GroupInvite's different lifecycle."""
+    """A passwordless, time-bound join link — used by WhatsApp-only
+    community members (no dashboard login), for convenience by every
+    identity-side participant (kind=personal), and, meeting-wide, as the
+    one shareable link that lets an uninvited newcomer join (kind=open —
+    see MeetingInviteKind). Deliberately not a `profiles.GroupInvite`
+    (that model is a durable, one-active-per-identity community
+    registration link with rotate-not-mutate semantics); a meeting invite
+    is single-meeting and expires with the meeting, so it gets its own
+    table rather than overloading GroupInvite's different lifecycle."""
 
     __tablename__ = "meeting_invite"
-    __table_args__ = {"schema": "meeting_room"}
+    __table_args__ = (
+        # At most one open (meeting-wide) invite per meeting — personal
+        # invites aren't constrained this way, a meeting can have many.
+        Index(
+            "uq_meeting_invite_open_per_meeting",
+            "meeting_id",
+            unique=True,
+            postgresql_where=text("kind = 'open'"),
+        ),
+        {"schema": "meeting_room"},
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
     meeting_id: Mapped[str] = mapped_column(
         ForeignKey("meeting_room.meeting.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    participant_id: Mapped[str] = mapped_column(
-        ForeignKey("meeting_room.meeting_participant.id", ondelete="CASCADE"), nullable=False, unique=True
+    kind: Mapped[MeetingInviteKind] = mapped_column(
+        Enum(MeetingInviteKind, name="meeting_invite_kind"), default=MeetingInviteKind.personal, nullable=False
+    )
+    # NULL for kind=open (meeting-scoped, no single participant to tie it
+    # to) — see MeetingInviteKind.open above.
+    participant_id: Mapped[str | None] = mapped_column(
+        ForeignKey("meeting_room.meeting_participant.id", ondelete="CASCADE"), nullable=True, unique=True
     )
     token: Mapped[str] = mapped_column(
         String(64), nullable=False, unique=True, index=True, default=lambda: secrets.token_urlsafe(24)
@@ -208,7 +266,7 @@ class MeetingInvite(Base):
     used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
-    participant: Mapped["MeetingParticipant"] = relationship(back_populates="invite")
+    participant: Mapped["MeetingParticipant | None"] = relationship(back_populates="invite")
 
 
 class WhatsAppLink(Base):
@@ -255,4 +313,40 @@ class SessionReport(Base):
     generated_by_staff_id: Mapped[str | None] = mapped_column(
         ForeignKey("core.staff_user.id", ondelete="SET NULL"), nullable=True
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False, index=True)
+
+
+class MeetingChatMessage(Base):
+    """One row per in-call chat message sent during a live meeting (see
+    `app.meeting_room.live_agents.chat_relay`) — persisted so chat survives
+    a page refresh/reconnect, matching this app's existing convention of
+    keeping every conversation for later review (same role the WhatsApp
+    `Message` model plays for the comms room). `translations` accumulates
+    lazily: only the languages a live participant actually needed while
+    the message was relayed (or later requested via the chat-history
+    fetch) are ever computed and cached here — never every possible
+    language up front."""
+
+    __tablename__ = "meeting_chat_message"
+    __table_args__ = (
+        # The client-generated message_id is the natural idempotency key —
+        # a retried/duplicate relay of the same message must not double-persist.
+        Index("uq_meeting_chat_message_id", "meeting_id", "message_id", unique=True),
+        {"schema": "meeting_room"},
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    meeting_id: Mapped[str] = mapped_column(
+        ForeignKey("meeting_room.meeting.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    message_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Raw LiveKit participant identity string (e.g. "identity:<id>",
+    # "staff:<id>", "guest:<uuid>") — not a FK, mirrors how MeetingParticipant
+    # already models three different identity shapes. Resolving a display
+    # name from this string at read time reuses the same lookup the
+    # scheduler UI already does for participants.
+    sender_identity: Mapped[str] = mapped_column(String(200), nullable=False)
+    original_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_language: Mapped[str] = mapped_column(String(20), nullable=False)
+    translations: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False, index=True)

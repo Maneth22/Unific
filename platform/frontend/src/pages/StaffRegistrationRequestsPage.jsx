@@ -1,11 +1,17 @@
 import React, { useEffect, useState } from 'react'
+import { Inbox } from 'lucide-react'
 import { approveRegistrationRequest, listRegistrationRequests, rejectRegistrationRequest } from '../api/profiles'
+import Card from '../components/ui/Card.jsx'
+import Badge from '../components/ui/Badge.jsx'
+import Button from '../components/ui/Button.jsx'
+import Input from '../components/ui/Input.jsx'
+import { SkeletonBlock } from '../components/ui/Skeleton.jsx'
 
 const STATUSES = ['pending', 'approved', 'rejected']
 
 export default function StaffRegistrationRequestsPage() {
   const [status, setStatus] = useState('pending')
-  const [requests, setRequests] = useState([])
+  const [requests, setRequests] = useState(null)
   const [error, setError] = useState('')
   const [busyId, setBusyId] = useState('')
   const [reasonById, setReasonById] = useState({})
@@ -14,7 +20,7 @@ export default function StaffRegistrationRequestsPage() {
     setRequests(await listRegistrationRequests(status))
   }
 
-  useEffect(() => { refresh() }, [status])
+  useEffect(() => { setRequests(null); refresh() }, [status])
 
   async function handleApprove(id) {
     setError('')
@@ -50,13 +56,13 @@ export default function StaffRegistrationRequestsPage() {
         community group and activates their login in one step.
       </p>
 
-      <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
+      <div className="ui-segmented" style={{ marginBottom: 16 }}>
         {STATUSES.map((s) => (
           <button
             key={s}
-            className="btn"
             onClick={() => setStatus(s)}
-            style={{ background: status === s ? 'var(--slate-bg)' : undefined }}
+            className={`ui-segmented-btn${status === s ? ' ui-segmented-btn--active' : ''}`}
+            style={{ textTransform: 'capitalize' }}
           >
             {s}
           </button>
@@ -65,14 +71,28 @@ export default function StaffRegistrationRequestsPage() {
 
       {error && <div className="badge badge-alert" style={{ display: 'block', marginBottom: 14, padding: '8px 12px' }}>{error}</div>}
 
-      {requests.length === 0 ? (
-        <div className="card" style={{ padding: 20, color: 'var(--sub)' }}>No {status} requests.</div>
+      {requests === null ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {Array.from({ length: 3 }).map((_, i) => (
+            <SkeletonBlock key={i} height={78} />
+          ))}
+        </div>
+      ) : requests.length === 0 ? (
+        <Card>
+          <div className="empty-state">
+            <span className="empty-state-icon">
+              <Inbox size={20} />
+            </span>
+            <h3>No {status} requests</h3>
+            <p>New registration requests in this status will show up here.</p>
+          </div>
+        </Card>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {requests.map((r) => (
-            <div key={r.id} className="card" style={{ padding: 16 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div>
+            <Card key={r.id} padding={16}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 700 }}>{r.org_name}</div>
                   <div style={{ fontSize: 12, color: 'var(--sub)' }}>{r.contact_name} · {r.email}</div>
                   <div style={{ fontSize: 11, color: 'var(--sub)', marginTop: 4 }}>
@@ -82,28 +102,27 @@ export default function StaffRegistrationRequestsPage() {
                     <div style={{ fontSize: 12, marginTop: 6 }}>Reason: {r.rejection_reason}</div>
                   )}
                 </div>
-                <span className={`badge ${r.status === 'approved' ? 'badge-agent' : r.status === 'rejected' ? 'badge-alert' : 'badge-pending'}`}>
-                  {r.status}
-                </span>
+                <Badge status={r.status} />
               </div>
 
               {r.status === 'pending' && (
-                <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
-                  <button className="btn btn-primary" disabled={busyId === r.id} onClick={() => handleApprove(r.id)}>
-                    {busyId === r.id ? 'Working…' : 'Approve'}
-                  </button>
-                  <input
-                    placeholder="Rejection reason (optional)"
-                    value={reasonById[r.id] || ''}
-                    onChange={(e) => setReasonById({ ...reasonById, [r.id]: e.target.value })}
-                    style={{ flex: 1, padding: 7, border: '1px solid var(--line)', borderRadius: 8, fontSize: 12 }}
-                  />
-                  <button className="btn" disabled={busyId === r.id} onClick={() => handleReject(r.id)}>
+                <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'flex-end' }}>
+                  <Button variant="primary" loading={busyId === r.id} onClick={() => handleApprove(r.id)}>
+                    Approve
+                  </Button>
+                  <div style={{ flex: 1 }}>
+                    <Input
+                      placeholder="Rejection reason (optional)"
+                      value={reasonById[r.id] || ''}
+                      onChange={(e) => setReasonById({ ...reasonById, [r.id]: e.target.value })}
+                    />
+                  </div>
+                  <Button variant="secondary" disabled={busyId === r.id} onClick={() => handleReject(r.id)}>
                     Reject
-                  </button>
+                  </Button>
                 </div>
               )}
-            </div>
+            </Card>
           ))}
         </div>
       )}
