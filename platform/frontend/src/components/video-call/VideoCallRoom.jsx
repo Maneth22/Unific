@@ -26,7 +26,10 @@ import { DEVICE_ERROR_NAMES, MIC_CAPTURE_OPTIONS } from './callConstants'
 // and simpler, since there's no longer a "first published track" to get
 // right before anyone else can hear it (dubbed audio is a shared track per
 // language, not a per-listener one).
-export default function VideoCallRoom({ serverUrl, token, onDisconnected, languages = ['en'], openInviteUrl, fetchChatHistory }) {
+export default function VideoCallRoom({
+  serverUrl, token, onDisconnected, languages = ['en'], openInviteUrl, fetchChatHistory,
+  viewerRole = 'guest', onRetryTranslation,
+}) {
   const [callError, setCallError] = useState(null)
   const deviceErrors = useDeviceErrorState()
 
@@ -97,6 +100,8 @@ export default function VideoCallRoom({ serverUrl, token, onDisconnected, langua
         languages={languages}
         openInviteUrl={openInviteUrl}
         fetchChatHistory={fetchChatHistory}
+        viewerRole={viewerRole}
+        onRetryTranslation={onRetryTranslation}
       />
     </LiveKitRoom>
   )

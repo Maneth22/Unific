@@ -2,6 +2,9 @@ import React, { useEffect, useState } from 'react'
 import { Navigate } from 'react-router-dom'
 import { useClientAuth } from '../context/ClientAuthContext'
 import { getAccountsOverview, fundMyAccount, transferMyCredit, getMyPermission, updateMyPermission } from '../api/clientProfiles'
+import { getClientIdentityToolConfig, listClientToolCatalog, updateClientIdentityToolConfig } from '../api/clientTools'
+import { getTranslationLanguages } from '../api/meetingRoom'
+import { LANGUAGE_LABELS } from '../components/video-call/callConstants'
 
 export default function ClientAccountsPage() {
   const { clientUser, isOwner } = useClientAuth()
@@ -129,6 +132,12 @@ export default function ClientAccountsPage() {
         ))}
       </div>
 
+      {/* --- Tools Registry (this org's choice — applies to your whole
+          organization, cascading to every community/member unless one
+          overrides it further) --- */}
+      <SectionTitle>Tools</SectionTitle>
+      <ToolsSection identityId={rootId} />
+
       {/* --- Gemini token dashboard --- */}
       <SectionTitle>AI token usage</SectionTitle>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
@@ -172,6 +181,140 @@ export default function ClientAccountsPage() {
 
 function SectionTitle({ children }) {
   return <div style={{ fontWeight: 800, fontSize: 13, margin: '0 0 8px', textTransform: 'uppercase', letterSpacing: 0.4, color: 'var(--sub)' }}>{children}</div>
+}
+
+// The five slots a client org can override — whatsapp_send/video_provider
+// are staff-global platform infra and never appear here (see backend
+// docs/ARCHITECTURE.md's Tools Registry section). A choice made here
+// applies to this entire organization (cascading to every community/
+// member under it) unless a descendant sets its own override.
+const CLIENT_SLOTS = [
+  { key: 'reply_generator', label: 'WhatsApp Auto-Reply Generator' },
+  { key: 'comms_agent', label: 'Comms Agent' },
+  { key: 'meeting_translation', label: 'Meeting Live Translation' },
+  { key: 'meeting_stt', label: 'Meeting Speech-to-Text', perLanguage: true },
+  { key: 'meeting_tts', label: 'Meeting Text-to-Speech (needs a voice id)', perLanguage: true },
+]
+
+function ToolsSection({ identityId }) {
+  const [catalog, setCatalog] = useState([])
+  const [config, setConfig] = useState(null)
+  const [languages, setLanguages] = useState(['en'])
+  const [error, setError] = useState('')
+  const [saved, setSaved] = useState('')
+
+  async function refresh() {
+    setError('')
+    try {
+      const [c, cfg, langs] = await Promise.all([
+        listClientToolCatalog(), getClientIdentityToolConfig(identityId), getTranslationLanguages(),
+      ])
+      setCatalog(c)
+      setConfig(cfg)
+      setLanguages(langs)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not load Tools')
+    }
+  }
+
+  useEffect(() => { refresh() }, [identityId])
+
+  async function handleSave(slot, language, toolKey, voice) {
+    setError('')
+    try {
+      const updated = await updateClientIdentityToolConfig(identityId, {
+        slot, tool_key: toolKey || null, language, voice: voice || null,
+      })
+      setConfig(updated)
+      setSaved(`${slot}:${language}`)
+      setTimeout(() => setSaved(''), 1500)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not save')
+    }
+  }
+
+  if (!config) return <div style={{ color: 'var(--sub)', marginBottom: 24 }}>Loading…</div>
+
+  return (
+    <div className="card" style={{ padding: 14, marginBottom: 24 }}>
+      <p style={{ fontSize: 12, color: 'var(--sub)', marginBottom: 10 }}>
+        Which service handles each of these for your organization — applies to your whole
+        organization unless a specific community/member is set up to override it. Leave a field
+        on "inherit" to use UNIFIC's system-wide default.
+      </p>
+      {error && <div className="badge badge-alert" style={{ display: 'block', marginBottom: 10, padding: '6px 10px' }}>{error}</div>}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {CLIENT_SLOTS.flatMap((slot) => {
+          const rowLanguages = slot.perLanguage ? languages : ['*']
+          const options = catalog.filter((o) => o.slot === slot.key)
+          return rowLanguages.map((lang) => {
+            const ownRaw = slot.perLanguage ? config[`own_${slot.key}`]?.[lang] : config[`own_${slot.key}`]
+            const own = ownRaw ? { tool_key: ownRaw.provider || ownRaw, voice: ownRaw.voice } : null
+            const effRaw = slot.perLanguage ? config[slot.key]?.[lang] : config[slot.key]
+            const effectiveKey = effRaw?.provider || effRaw
+            const rowKey = `${slot.key}:${lang}`
+            return (
+              <ToolRow
+                key={rowKey}
+                label={slot.perLanguage ? `${slot.label} — ${LANGUAGE_LABELS[lang] || lang}` : slot.label}
+                effective={effectiveKey}
+                inherited={!own}
+                options={options}
+                own={own}
+                needsVoice={slot.key === 'meeting_tts'}
+                saveLabel={saved === rowKey ? '✓ saved' : 'Save'}
+                onSave={(toolKey, voice) => handleSave(slot.key, lang, toolKey, voice)}
+              />
+            )
+          })
+        })}
+      </div>
+    </div>
+  )
+}
+
+function ToolRow({ label, effective, inherited, options, own, needsVoice, saveLabel, onSave }) {
+  const [toolKey, setToolKey] = useState(own?.tool_key || '')
+  const [voice, setVoice] = useState(own?.voice || '')
+
+  useEffect(() => {
+    setToolKey(own?.tool_key || '')
+    setVoice(own?.voice || '')
+  }, [own?.tool_key, own?.voice])
+
+  const dirty = toolKey !== (own?.tool_key || '') || (needsVoice && voice !== (own?.voice || ''))
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: 'var(--sub)', marginBottom: 2 }}>
+        {label} — currently: {effective || '—'}{inherited ? ' (inherited)' : ''}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <select value={toolKey} onChange={(e) => setToolKey(e.target.value)} style={input}>
+          <option value="">— inherit —</option>
+          {options.map((o) => (
+            <option key={o.tool_key} value={o.tool_key}>{o.display_name}</option>
+          ))}
+        </select>
+        {needsVoice && (
+          <input
+            placeholder="voice id"
+            value={voice}
+            onChange={(e) => setVoice(e.target.value)}
+            style={{ ...input, width: 200 }}
+            disabled={!toolKey}
+          />
+        )}
+        <button
+          className="btn btn-primary"
+          disabled={!dirty}
+          onClick={() => onSave(toolKey, voice)}
+        >
+          {saveLabel}
+        </button>
+      </div>
+    </div>
+  )
 }
 
 const cell = { padding: '9px 14px' }

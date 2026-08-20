@@ -1,3 +1,4 @@
+from app.core.models.agent_run_log import AgentRunLog, AgentRunStatus
 from app.core.models.archive import ArchiveItem, ArchiveItemStatus, ArchiveShelf
 from app.core.models.audit import ActorType, AuditLog
 from app.core.models.calendar import CalendarEvent
@@ -7,9 +8,12 @@ from app.core.models.ledger import LedgerEntry, LedgerEntryType
 from app.core.models.llm_usage import LlmUsageRecord
 from app.core.models.room_account import AgentSubAccount, RoomAccount
 from app.core.models.staff import LoginAttempt, RefreshToken, StaffCategory, StaffTier, StaffUser
+from app.core.models.tools import GLOBAL_LANGUAGE, GLOBAL_ONLY_SLOTS, PER_LANGUAGE_SLOTS, ToolCatalogEntry, ToolGlobalSelection, ToolSlot
 from app.core.models.webhook_log import WebhookDirection, WebhookLog
 
 __all__ = [
+    "AgentRunLog",
+    "AgentRunStatus",
     "ArchiveItem",
     "ArchiveItemStatus",
     "ArchiveShelf",
@@ -30,6 +34,12 @@ __all__ = [
     "StaffCategory",
     "StaffTier",
     "StaffUser",
+    "GLOBAL_LANGUAGE",
+    "GLOBAL_ONLY_SLOTS",
+    "PER_LANGUAGE_SLOTS",
+    "ToolCatalogEntry",
+    "ToolGlobalSelection",
+    "ToolSlot",
     "WebhookDirection",
     "WebhookLog",
 ]

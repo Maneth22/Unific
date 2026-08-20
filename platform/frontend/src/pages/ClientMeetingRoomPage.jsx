@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import {
   addMyParticipant, endMyMeeting, generateReport, getMyConversation, getMyMeeting, getMyMeetingChat, initiateRoom,
-  joinMyMeeting, listMyConversations, listMyMeetings, listReports, scheduleMyMeeting, sendMyReply,
+  joinMyMeeting, listMyConversations, listMyMeetings, listReports, retryMyMeetingTranslation, scheduleMyMeeting,
+  sendMyReply,
 } from '../api/clientMeetingRoom'
 import { getTranslationLanguages } from '../api/meetingRoom'
 import { listMyIdentities } from '../api/clientProfiles'
@@ -234,6 +235,8 @@ function MeetingsTab() {
           openInviteUrl={call.open_invite_url}
           onDisconnected={() => setCall(null)}
           fetchChatHistory={() => getMyMeetingChat(call.meeting_id)}
+          viewerRole="host"
+          onRetryTranslation={() => retryMyMeetingTranslation(call.meeting_id)}
         />
       </div>
     )

@@ -20,13 +20,65 @@ services:
     image: redis:7-alpine
     container_name: unific_redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
+    # No `ports:` here on purpose — backend/worker reach this over the
+    # internal compose network at redis:6379, and nothing outside the
+    # containers needs it. A prior "6379:6379" mapping published Redis to
+    # 0.0.0.0 on the host (Docker writes iptables rules ahead of UFW, so a
+    # host firewall alone does NOT stop this — see DigitalOcean's exposed-
+    # Redis notice). requirepass below is defense-in-depth in case a
+    # mapping like that ever comes back.
+    command: redis-server --requirepass "${REDIS_PASSWORD:?Set REDIS_PASSWORD in platform/.env — see platform/.env.example}"
     volumes:
       - unific_redis_data:/data
     # Small session cache only (WhatsApp same-day turns/counters) — doesn't
     # need much; same rationale as postgres's mem_limit above.
     mem_limit: 128m
+
+  backend:
+    build:
+      context: ./backend
+    container_name: unific_backend
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - ./backend/.env
+    environment:
+      # Override the two host-mapped-port DSNs from .env (meant for a bare
+      # local uvicorn process) with the in-network service names/ports —
+      # everything else in .env is shared as-is between bare and
+      # containerized dev.
+      DATABASE_URL: postgresql+asyncpg://unific:unific_dev_password@postgres:5432/unific_platform
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in platform/.env — see platform/.env.example}@redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    # Stays a single container/replica — see docs/legacy/PLATFORM_README.md
+    # "Running on a small droplet": live_agents/orchestrator.py's `_running`
+    # registry is in-process state; multiple backend replicas would double-
+    # start a meeting's agent. Do not scale this service horizontally as-is.
+    mem_limit: 512m
+
+  worker:
+    build:
+      context: ./backend
+    container_name: unific_worker
+    restart: unless-stopped
+    command: arq app.worker.WorkerSettings
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://unific:unific_dev_password@postgres:5432/unific_platform
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in platform/.env — see platform/.env.example}@redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    # Unlike `backend`, this one IS meant to be horizontally scalable per
+    # the rebuild directive's non-negotiables — arq workers coordinate via
+    # Redis, no in-process state. Only a health-check placeholder job
+    # exists in Phase 0 (see app/worker.py).
+    mem_limit: 256m
 
 volumes:
   unific_pgdata:

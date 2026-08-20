@@ -16,7 +16,16 @@ from app.database import Base
 # skipped silently so this file doesn't need editing each phase.
 import app.core.models  # noqa: F401
 
-for _module in ("app.accounts.models", "app.profiles.models", "app.meeting_room.models", "app.tasking.models"):
+for _module in (
+    "app.accounts.models",
+    "app.profiles.models",
+    "app.meeting_room.models",
+    "app.tasking.models",
+    "app.orgs.models",
+    "app.whatsapp.models",
+    "app.plugins.models",
+    "app.meetings.models",
+):
     try:
         __import__(_module)
     except ModuleNotFoundError:

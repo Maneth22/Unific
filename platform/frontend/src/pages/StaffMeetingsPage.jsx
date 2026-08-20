@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { getMyStaffMeetingChat, joinMeeting, listMyMeetings } from '../api/meetingRoom'
+import { getMyStaffMeetingChat, joinMeeting, listMyMeetings, retryMeetingTranslation } from '../api/meetingRoom'
 import VideoCallRoom from '../components/VideoCallRoom'
 
 const STATUS_BADGE = {
@@ -55,6 +55,8 @@ export default function StaffMeetingsPage() {
           openInviteUrl={call.open_invite_url}
           onDisconnected={() => setCall(null)}
           fetchChatHistory={() => getMyStaffMeetingChat(call.meeting_id)}
+          viewerRole="staff"
+          onRetryTranslation={() => retryMeetingTranslation(call.meeting_id)}
         />
       </div>
     )

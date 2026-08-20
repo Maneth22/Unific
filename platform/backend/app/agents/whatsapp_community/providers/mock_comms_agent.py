@@ -12,7 +12,8 @@ from app.core.providers.base import CommsAgent, InboundClarification, OutboundTr
 
 class MockCommsAgent(CommsAgent):
     async def clarify_inbound(
-        self, db: AsyncSession, text: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, text: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> InboundClarification:
         return InboundClarification(detected_language="English", detected_code="en", clarification=text)
 
@@ -25,6 +26,7 @@ class MockCommsAgent(CommsAgent):
         identity_id: str | None,
         room: RoomName,
         agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         return {
             "language_proficiency": "fluent",
@@ -46,13 +48,15 @@ class MockCommsAgent(CommsAgent):
         identity_id: str | None,
         room: RoomName,
         agent_name: str,
+        member_id: str | None = None,
     ) -> OutboundTranslation:
         language = (target_language or "auto").lower()
         translated = text if language in ("auto", "en", "english") else f"[{language}] {text}"
         return OutboundTranslation(translated_text=translated, key_points=[], english_preview=text)
 
     async def generate_session_report(
-        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         return {
             "summary": "Mock session report — no LLM configured.",
@@ -68,7 +72,8 @@ class MockCommsAgent(CommsAgent):
         }
 
     async def generate_satisfaction_analysis(
-        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         return {
             "satisfaction_level": "medium",
@@ -82,7 +87,8 @@ class MockCommsAgent(CommsAgent):
         }
 
     async def generate_member_summary(
-        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         return {
             "profile_summary": "Mock member summary — no LLM configured.",

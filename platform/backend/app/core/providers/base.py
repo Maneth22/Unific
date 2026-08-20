@@ -107,6 +107,7 @@ class ReplyGenerator(ABC):
         room: RoomName,
         agent_name: str,
         chat_history: str = "",
+        member_id: str | None = None,
     ) -> str:
         """The community service agent's reply-drafting step. `context_snippets`
         is drawn from the Meeting Room's own Shelf 1 (Operational Library,
@@ -116,7 +117,13 @@ class ReplyGenerator(ABC):
         `app.agents.whatsapp_community.orchestrator._build_chat_history`)
         is the recent conversation so far, letting a real implementation hold a
         conversational, session-aware exchange rather than answering each
-        message in isolation."""
+        message in isolation.
+
+        `member_id` (UNIFIC v2's flat `orgs.Member`) is the new WhatsApp
+        pipeline's caller-side principal, additive alongside `identity_id`
+        — at most one of the two is ever set. Optional, defaults to None,
+        so every existing (old-pipeline) call site is unaffected. See
+        `app.whatsapp.orchestrator` and docs/PHASE_2_NOTES.md."""
 
 
 @dataclass
@@ -146,11 +153,16 @@ class CommsAgent(ABC):
     (see `comms_prompts.py`). One agent, five actions, so the whole
     bidirectional WhatsApp flow and its analysis share a single provider
     swap point. Every method takes `db`/`identity_id` so a real (LLM)
-    implementation can record its usage per identity."""
+    implementation can record its usage per identity. Every method also
+    takes an optional `member_id` (UNIFIC v2's flat `orgs.Member`,
+    additive alongside `identity_id` — at most one of the two is ever
+    set, default None so old-pipeline call sites are unaffected) — see
+    `ReplyGenerator.generate_reply`'s docstring for the full reasoning."""
 
     @abstractmethod
     async def clarify_inbound(
-        self, db: AsyncSession, text: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, text: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> InboundClarification:
         """Community message -> detected language + clear English for the client."""
 
@@ -164,6 +176,7 @@ class CommsAgent(ABC):
         identity_id: str | None,
         room: RoomName,
         agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         """Community message -> tone/proficiency/style insight JSON for the client."""
 
@@ -180,6 +193,7 @@ class CommsAgent(ABC):
         identity_id: str | None,
         room: RoomName,
         agent_name: str,
+        member_id: str | None = None,
     ) -> OutboundTranslation:
         """Client English -> community language, in tone + character voice.
         `target_language` of "auto" means: match whatever language the
@@ -187,20 +201,23 @@ class CommsAgent(ABC):
 
     @abstractmethod
     async def generate_session_report(
-        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         """Full transcript -> summary / needs vs offers / sentiment / profile JSON."""
 
     @abstractmethod
     async def generate_satisfaction_analysis(
-        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         """Full transcript -> community satisfaction JSON (level, score, trend,
         positives/concerns/unmet needs/recommendations)."""
 
     @abstractmethod
     async def generate_member_summary(
-        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         """Full transcript -> a community member's ongoing profile summary
         for the client dashboard's community roster — framed as "who this

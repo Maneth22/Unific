@@ -18,6 +18,11 @@ export const scheduleMyMeeting = (payload) => apiClient.post('/meeting-room/clie
 export const endMyMeeting = (id) => apiClient.post(`/meeting-room/client/meetings/${id}/end`).then((r) => r.data)
 export const joinMyMeeting = (id, identityId) =>
   apiClient.post(`/meeting-room/client/meetings/${id}/join`, identityId ? { identity_id: identityId } : {}).then((r) => r.data)
+// Re-attempts starting live translation for a meeting whose pipeline
+// failed or crashed — any client whose scope covers this meeting (see
+// TranslatorParticipant.jsx's Retry button).
+export const retryMyMeetingTranslation = (id) =>
+  apiClient.post(`/meeting-room/client/meetings/${id}/translation/retry`).then((r) => r.data)
 // Adds one more identity (from the client's own scope) to an
 // already-scheduled/live meeting.
 export const addMyParticipant = (id, identityId) =>

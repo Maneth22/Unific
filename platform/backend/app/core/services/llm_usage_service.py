@@ -32,11 +32,13 @@ async def record_usage(
     completion_tokens: int | None = None,
     total_tokens: int | None = None,
     estimated_cost: Decimal | None = None,
+    member_id: str | None = None,
 ) -> LlmUsageRecord:
     record = LlmUsageRecord(
         room=room,
         agent_name=agent_name,
         identity_id=identity_id,
+        member_id=member_id,
         provider=provider,
         model=model,
         action=action,

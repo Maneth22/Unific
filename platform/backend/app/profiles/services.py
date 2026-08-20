@@ -24,6 +24,8 @@ from app.core.models.common import RoomName, utcnow
 from app.core.models.ledger import LedgerEntry, LedgerEntryType
 from app.core.security.password import hash_password
 from app.core.services import audit_service, scope_service
+from app.core.services import tools_service
+from app.core.services.tools_service import ToolGlobalDefaults
 from app.profiles.models import (
     ClientOrgProfile,
     ConsentContext,
@@ -100,9 +102,25 @@ def _merge_config(own: str | None, parent_eff: str | None, is_root: bool, defaul
     return parent_eff if not is_root else default
 
 
-def _compute_effective(perm: Permission, parent_perm: Permission | None) -> None:
+def _merge_config_map(own: dict | None, parent_eff: dict, is_root: bool, default_map: dict) -> dict:
+    """Per-language version of `_merge_config` for `meeting_stt`/
+    `meeting_tts` tool selection — merged key-by-key, not replaced
+    wholesale: a language absent from `own` inherits that one language
+    from the parent's effective map (or the global default map at root);
+    a language present in `own` overrides just that key. Mirrors
+    `_merge_config`'s own/parent_eff/is_root/default shape exactly."""
+    base = dict(default_map) if is_root else dict(parent_eff)
+    if own:
+        base.update(own)
+    return base
+
+
+def _compute_effective(perm: Permission, parent_perm: Permission | None, tool_defaults: ToolGlobalDefaults) -> None:
     """Mutates `perm.effective_*` in place from `perm.own_*` and the
-    parent's already-computed `effective_*` (or ROOT_DEFAULTS if none)."""
+    parent's already-computed `effective_*` (or ROOT_DEFAULTS/
+    `tool_defaults` if none — the Tools Registry's five cascading slots
+    use the staff-editable `tool_defaults` instead of a Python literal;
+    every other field still uses ROOT_DEFAULTS)."""
     is_root = parent_perm is None
     p = parent_perm
 
@@ -135,17 +153,41 @@ def _compute_effective(perm: Permission, parent_perm: Permission | None) -> None
         perm.own_reply_language, p.effective_reply_language if p else None, is_root, ROOT_DEFAULTS["reply_language"]
     )
 
+    perm.effective_reply_generator_tool = _merge_config(
+        perm.own_reply_generator_tool, p.effective_reply_generator_tool if p else None,
+        is_root, tool_defaults.reply_generator_tool,
+    )
+    perm.effective_comms_agent_tool = _merge_config(
+        perm.own_comms_agent_tool, p.effective_comms_agent_tool if p else None,
+        is_root, tool_defaults.comms_agent_tool,
+    )
+    perm.effective_meeting_translation_tool = _merge_config(
+        perm.own_meeting_translation_tool, p.effective_meeting_translation_tool if p else None,
+        is_root, tool_defaults.meeting_translation_tool,
+    )
+    perm.effective_meeting_stt_tools = _merge_config_map(
+        perm.own_meeting_stt_tools, p.effective_meeting_stt_tools if p else {},
+        is_root, tool_defaults.meeting_stt_tools,
+    )
+    perm.effective_meeting_tts_tools = _merge_config_map(
+        perm.own_meeting_tts_tools, p.effective_meeting_tts_tools if p else {},
+        is_root, tool_defaults.meeting_tts_tools,
+    )
+
 
 async def recompute_cascade(db: AsyncSession, identity_id: str) -> None:
     """Recomputes effective permissions for `identity_id` and every
     descendant, parent-first, in a single pass — called after any own_*
-    change or a subtree move."""
+    change or a subtree move. Tool-registry global defaults are loaded
+    ONCE here, not per descendant, since core.tool_global_selection is the
+    same read for every node in the pass."""
+    tool_defaults = await tools_service.load_global_defaults(db)
     ids = await scope_service.descendant_ids(db, identity_id, include_self=True)
     for node_id in ids:
         identity = await db.get(Identity, node_id)
         perm = await db.get(Permission, node_id)
         parent_perm = await db.get(Permission, identity.parent_id) if identity.parent_id else None
-        _compute_effective(perm, parent_perm)
+        _compute_effective(perm, parent_perm, tool_defaults)
     await db.flush()
 
 
@@ -188,8 +230,9 @@ async def create_identity(
     identity.path = scope_service.child_path(parent.path if parent else None, identity.id)
 
     parent_perm = await db.get(Permission, parent_id) if parent_id else None
+    tool_defaults = await tools_service.load_global_defaults(db)
     perm = Permission(identity_id=identity.id, consent_required=(id_type == IdentityType.member))
-    _compute_effective(perm, parent_perm)
+    _compute_effective(perm, parent_perm, tool_defaults)
     db.add(perm)
 
     db.add(ProfileAccount(identity_id=identity.id))

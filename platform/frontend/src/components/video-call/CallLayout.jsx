@@ -19,7 +19,7 @@ import CallControlBar from './CallControlBar'
 import CaptionBar from './CaptionBar'
 import ChatPanel from './ChatPanel'
 import SelectiveAudioRenderer from './SelectiveAudioRenderer'
-import TranslationIndicator from './TranslationIndicator'
+import TranslatorParticipant from './TranslatorParticipant'
 import { AUDIO_MODE_CAPTIONS_ONLY, LIVE_AGENTS_BOT_IDENTITY, SPEAKER_FOCUS_PARTICIPANT_THRESHOLD, sameTrackRef } from './callConstants'
 
 // Replaces LiveKit's <VideoConference/> prefab with the same building blocks
@@ -28,7 +28,9 @@ import { AUDIO_MODE_CAPTIONS_ONLY, LIVE_AGENTS_BOT_IDENTITY, SPEAKER_FOCUS_PARTI
 // subscription and pin/focus machinery while controlling the visuals
 // (ParticipantTileBody) and adding a second auto-focus source: the active
 // speaker, once the call gets crowded (see the second effect below).
-export default function CallLayout({ deviceErrors, languages = ['en'], openInviteUrl, fetchChatHistory }) {
+export default function CallLayout({
+  deviceErrors, languages = ['en'], openInviteUrl, fetchChatHistory, viewerRole = 'guest', onRetryTranslation,
+}) {
   const [showChat, setShowChat] = useState(false)
   // Four distinct settings where the old design had one overloaded
   // `preferredLanguage` — see CallControlBar.jsx's own comment for why.
@@ -50,20 +52,25 @@ export default function CallLayout({ deviceErrors, languages = ['en'], openInvit
   const lastAutoFocusedSpeakerIdentity = useRef(null)
 
   // The backend's one live_agents bot identity (dubbed-audio tracks,
-  // captions, chat relay) is an implementation detail, not a person on the
-  // call — without filtering, it would get its own camera-off placeholder
-  // tile here (withPlaceholder: true gives every camera-less participant
-  // one), cluttering the grid with a silent tile. Excluded here at the
-  // source so every derived list (screen share, carousel, the
-  // crowd-threshold count) stays clean automatically; TranslationIndicator
-  // below shows one single "translation active" signal instead.
+  // captions, chat relay) is a REAL LiveKit participant (see
+  // orchestrator.py, .with_name("Translator")) — NOT filtered out of the
+  // grid, so it gets the same camera-off placeholder tile
+  // (withPlaceholder: true) any other camera-less human would, via the
+  // same unmodified ParticipantTileBody. That's what makes it visibly
+  // "an active participant" rather than a UI-only badge: its tile shows
+  // the same "Translator" name + initials avatar as everyone else's, and
+  // picks up the exact same native `data-lk-speaking` highlight (see
+  // video-call.css) the instant it's actually publishing translated
+  // audio — no separate speaking-state plumbing needed for that.
+  // TranslatorParticipant below is now only ever a degraded-status/retry
+  // notification, not a presence indicator.
   const tracks = useTracks(
     [
       { source: Track.Source.Camera, withPlaceholder: true },
       { source: Track.Source.ScreenShare, withPlaceholder: false },
     ],
     { updateOnlyOn: [RoomEvent.ActiveSpeakersChanged], onlySubscribed: false },
-  ).filter((track) => track.participant.identity !== LIVE_AGENTS_BOT_IDENTITY)
+  )
 
   const layoutContext = useCreateLayoutContext()
   const speakingParticipants = useSpeakingParticipants()
@@ -158,7 +165,11 @@ export default function CallLayout({ deviceErrors, languages = ['en'], openInvit
 
   return (
     <div className="lk-video-conference cq-call-shell">
-      <TranslationIndicator active={translationActive} />
+      <TranslatorParticipant
+        active={translationActive}
+        viewerRole={viewerRole}
+        onRetry={onRetryTranslation}
+      />
       <CaptionBar captionLanguage={callSettings.captionLanguage} />
       <LayoutContextProvider value={layoutContext}>
         <div className="lk-video-conference-inner">

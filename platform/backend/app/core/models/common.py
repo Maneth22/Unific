@@ -32,3 +32,19 @@ class RoomName(str, enum.Enum):
     resources = "resources"
     assets = "assets"
     hold_data = "hold_data"
+    # UNIFIC v2's flat org/member schema (docs/adr/0003) — additive
+    # alongside the eight rooms above, not a replacement for any of them
+    # yet (accounts/profiles/meeting_room/tasking are untouched until
+    # their own rebuild phases).
+    orgs = "orgs"
+    # UNIFIC v2's new WhatsApp pipeline (app/whatsapp/*), bound to
+    # orgs.Member — distinct from meeting_room, which still tags the OLD
+    # WhatsApp pipeline's rows. Lets agent_run_log/webhook_log/audit_log/
+    # llm_usage_record rows from the two pipelines stay distinguishable.
+    whatsapp = "whatsapp"
+    # UNIFIC v2's new meetings pipeline (app/meetings/*), bound to
+    # orgs.Org/Member — distinct from meeting_room, which still tags the
+    # OLD meeting pipeline's rows.
+    meetings = "meetings"
+    # UNIFIC v2's plugin/marketplace entitlement system (app/plugins/*).
+    plugins = "plugins"

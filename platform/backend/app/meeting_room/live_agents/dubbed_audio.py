@@ -1,142 +1,256 @@
-"""Optional live dubbed audio: one shared track per active target
-language — never per listener, never per (speaker × language). Two
-speakers who both need translating into the same language at the same
-moment get sequenced back-to-back onto that one track via a per-language
-queue + single writer task, not mixed — true sample-level audio mixing
-of two overlapping synthetic voices would be less intelligible than
-queued playback, so this is a deliberate design choice, not a shortcut.
+"""Live dubbed audio — Gemini 3.5 Live Translate
+(`gemini-3.5-live-translate-preview`, via the Gemini Live API), NOT a
+separate STT-text-translate-TTS chain. A single audio-in/audio-out model
+per active target language, entirely independent of captions.py's STT
+pipeline and translator.py's text-translation pipeline (which back
+captions/chat only) — no TTS provider is used or needed anywhere in this
+module.
 
-`DubbedAudioManager.sync()` is the single choke point that recomputes
-which languages are actually in demand (any participant with
-`audio_mode=dubbed_audio` and that `caption_language`) and starts/stops
-`LanguageAudioPipeline`s to match — called from every orchestrator event
-that could change demand, so a participant flipping `audio_mode` or
-`caption_language` mid-call starts or tears down a pipeline live, with no
-reconnect needed.
+One shared `translated-<lang>` track per active target language — never
+per listener — same demand-driven shape `DubbedAudioManager.sync()`
+always had: it reconciles which languages are actually wanted (any
+participant with `audio_mode=dubbed_audio` and that `caption_language`)
+and starts/stops `LanguageAudioPipeline`s to match.
+
+What's new: each active language's Gemini Live session needs a
+continuous raw-audio INPUT stream, and a meeting can have more than one
+person talking over its lifetime — so every active pipeline is fed by
+whichever participant is CURRENTLY the room's active speaker (LiveKit's
+own `active_speakers_changed` detection, forwarded here by
+orchestrator.py), not a fixed "host" track. `DubbedAudioManager` owns
+exactly ONE subscription to the current active speaker's mic track (the
+`_bridge_loop`) and fans each frame out to every active language's
+Gemini session — avoids N redundant subscriptions to the same track for
+N active languages.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from dataclasses import dataclass
 
 from livekit import rtc
 
+from app.config import settings
 from app.meeting_room.live_agents.participant_attrs import ParticipantRegistry
-from app.meeting_room.live_agents.providers import get_tts_for_language
+from app.meeting_room.live_agents.status import TranslationErrorScope
 
 logger = logging.getLogger("live_agents.dubbed_audio")
 
 DUBBED_TRACK_NAME_PREFIX = "translated-"
 
+# Gemini Live's own fixed wire formats (see live-translate docs) — not
+# configurable, not the same rate both directions.
+_INPUT_SAMPLE_RATE = 16000
+_OUTPUT_SAMPLE_RATE = 24000
 
-@dataclass
-class _Segment:
-    text: str
-    source_identity: str
-    enqueued_at: float
+# LanguageAudioPipeline._supervise's reconnect tuning — see that method's
+# own docstring. A single blip (network hiccup, Gemini closing a session
+# at its own duration limit) self-heals silently; only a SUSTAINED run of
+# failures gets surfaced to on_error.
+_FAILURE_REPORT_THRESHOLD = 3
+_MAX_BACKOFF_SECONDS = 15
 
 
 class LanguageAudioPipeline:
-    """One per active target language. Owns the queue, the shared
-    `AudioSource`, and the published `translated-<lang>` track; a single
-    writer task drains the queue in arrival order and synthesizes+
-    publishes each segment before picking up the next one."""
+    """One per active target language. Owns the published
+    `translated-<lang>` track (created once, for this pipeline's whole
+    life) and a self-healing Gemini Live Translate SESSION underneath it
+    (opened, closed, and reopened as many times as needed — see
+    `_supervise` — without ever touching the track or the caller-visible
+    "this language is active" state). Never subscribes to any LiveKit
+    track itself — `DubbedAudioManager`'s active-speaker bridge pushes
+    raw input audio in via `feed_audio`."""
 
     def __init__(
         self,
         *,
         room: rtc.Room,
         target_lang: str,
-        tts,
-        queue_maxsize: int,
-        tts_semaphore: asyncio.Semaphore,
+        translate_semaphore: asyncio.Semaphore,
+        on_error=None,  # Callable[[TranslationErrorScope, str, str], None] — (scope, subject, detail), optional
+        on_recovered=None,  # Callable[[TranslationErrorScope, str], None] — (scope, subject), optional
     ) -> None:
         self._room = room
         self._target_lang = target_lang
-        self._tts = tts
-        self._tts_semaphore = tts_semaphore
-        self._queue: asyncio.Queue[_Segment] = asyncio.Queue(maxsize=queue_maxsize)
+        self._translate_semaphore = translate_semaphore
+        self._on_error = on_error
+        self._on_recovered = on_recovered
+        self._sem_acquired = False
         self._audio_source: rtc.AudioSource | None = None
         self._publication: rtc.LocalTrackPublication | None = None
-        self._writer_task: asyncio.Task | None = None
+        self._session_cm = None
+        self._session = None
+        self._consecutive_failures = 0
         self._start_task: asyncio.Task | None = None
-        self._sem_acquired = False
-        self._dropped_count = 0
+        self._stopped = False
 
     def launch(self) -> asyncio.Task:
         """Same launch()/stop() shape as SpeakerSTTSession — tracks the
         background start() task so stop() can cancel it cleanly (and
-        still release the semaphore / unpublish whatever got as far as
-        being created) even if called while still queued/mid-startup."""
+        still release the semaphore / unpublish / close whatever got as
+        far as being created) even if called while still mid-startup.
+        This task now runs for the pipeline's ENTIRE life (setup, then
+        the indefinite _supervise() reconnect loop), not just a one-shot
+        session open."""
         self._start_task = asyncio.create_task(self.start())
         return self._start_task
 
     async def start(self) -> None:
-        await self._tts_semaphore.acquire()
+        await self._translate_semaphore.acquire()
         self._sem_acquired = True
 
-        self._audio_source = rtc.AudioSource(self._tts.sample_rate, self._tts.num_channels)
         track_name = f"{DUBBED_TRACK_NAME_PREFIX}{self._target_lang}"
-        local_track = rtc.LocalAudioTrack.create_audio_track(track_name, self._audio_source)
-        self._publication = await self._room.local_participant.publish_track(
-            local_track,
-            rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE),
-        )
-        self._writer_task = asyncio.create_task(self._writer_loop())
-        logger.info("dubbed-audio pipeline started lang=%s track=%s", self._target_lang, track_name)
-
-    def enqueue(self, text: str, *, source_identity: str) -> None:
-        """Drop-newest-when-full: rejecting the incoming segment bounds
-        worst-case backlog latency; evicting an already-queued older
-        segment instead would produce gappy/out-of-order dubbed audio,
-        which is worse."""
         try:
-            self._queue.put_nowait(_Segment(text=text, source_identity=source_identity, enqueued_at=time.monotonic()))
-        except asyncio.QueueFull:
-            self._dropped_count += 1
-            logger.warning(
-                "dubbed-audio queue full lang=%s — dropping newest segment (dropped_total=%d)",
-                self._target_lang, self._dropped_count,
+            self._audio_source = rtc.AudioSource(_OUTPUT_SAMPLE_RATE, 1)
+            local_track = rtc.LocalAudioTrack.create_audio_track(track_name, self._audio_source)
+            self._publication = await self._room.local_participant.publish_track(
+                local_track,
+                rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE),
             )
+        except Exception as exc:
+            logger.exception("failed to publish dubbed-audio track lang=%s", self._target_lang)
+            if self._on_error is not None:
+                self._on_error(TranslationErrorScope.language, self._target_lang, str(exc))
+            if self._sem_acquired:
+                self._translate_semaphore.release()
+                self._sem_acquired = False
+            return
+        logger.info("dubbed-audio (Gemini Live Translate) pipeline started lang=%s track=%s", self._target_lang, track_name)
 
-    async def _writer_loop(self) -> None:
+        await self._supervise()
+
+    async def feed_audio(self, pcm_bytes: bytes) -> None:
+        """Called by DubbedAudioManager's active-speaker bridge, once per
+        audio frame from whoever is currently talking. Silently drops
+        frames if the session isn't up yet/anymore (mid-reconnect, or not
+        started) — best-effort, same philosophy as everywhere else in
+        this pipeline; a dropped input frame just means a brief gap in
+        translation, not a crash, and NOT queued/replayed once the
+        session comes back (stale audio would just desync further)."""
+        if self._session is None or self._stopped:
+            return
+        from google.genai import types
+
         try:
-            while True:
-                segment = await self._queue.get()
-                t0 = time.monotonic()
-                try:
-                    async with self._tts.synthesize(segment.text) as stream:
-                        async for audio in stream:
-                            await self._audio_source.capture_frame(audio.frame)
-                except Exception:
-                    logger.exception("TTS synthesis failed lang=%s", self._target_lang)
-                    continue
-                logger.info(
-                    "dubbed-audio tts_ms=%d lang=%s source=%s queue_wait_ms=%d",
-                    (time.monotonic() - t0) * 1000, self._target_lang, segment.source_identity,
-                    (t0 - segment.enqueued_at) * 1000,
-                )
-        except asyncio.CancelledError:
-            pass
+            await self._session.send_realtime_input(
+                audio=types.Blob(data=pcm_bytes, mime_type=f"audio/pcm;rate={_INPUT_SAMPLE_RATE}")
+            )
         except Exception:
-            logger.exception("dubbed-audio writer loop crashed lang=%s", self._target_lang)
+            logger.exception("failed to feed audio into Gemini Live Translate session lang=%s", self._target_lang)
+
+    async def _supervise(self) -> None:
+        """Keeps the Gemini Live SESSION alive across any number of
+        reconnects — the published TRACK (start() above) never gets torn
+        down or re-created; only the underlying translation session
+        cycles underneath it, so the meeting's "Translator is here"
+        presence (TranslatorParticipant.jsx) never flickers off just
+        because one session round dropped.
+
+        Retries indefinitely with capped exponential backoff — only
+        stop() ends this loop, it never gives up on its own. A session
+        ending is treated as "reconnect needed" whether it ends via an
+        exception OR the receive() stream just completing cleanly (e.g.
+        Gemini closing the session at its own duration limit) — both are
+        "no longer translating," the caller doesn't get to tell the
+        difference from outside.
+
+        A single blip self-heals silently (log-only) — only once
+        _FAILURE_REPORT_THRESHOLD consecutive attempts have failed does
+        this actually call on_error; the moment a session opens
+        successfully after that threshold was crossed, on_recovered
+        fires once and the counter resets."""
+        while not self._stopped:
+            try:
+                # Deferred to here, not module import time — google-genai
+                # is real weight to load into every process at boot even
+                # on a deployment that never touches live dubbing in a
+                # given run (e.g. most test runs), same lazy-import
+                # reasoning providers.py's module docstring documents for
+                # its own SDKs.
+                from google import genai
+                from google.genai import types
+
+                client = genai.Client(api_key=settings.gemini_api_key)
+                config = types.LiveConnectConfig(
+                    response_modalities=["AUDIO"],
+                    translation_config=types.TranslationConfig(target_language_code=self._target_lang),
+                )
+                session_cm = client.aio.live.connect(model=settings.live_agents_live_translate_model, config=config)
+                self._session = await session_cm.__aenter__()
+                self._session_cm = session_cm
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._handle_reconnect_failure(exc)
+                continue
+
+            was_previously_reported = self._consecutive_failures >= _FAILURE_REPORT_THRESHOLD
+            self._consecutive_failures = 0
+            if was_previously_reported and self._on_recovered is not None:
+                self._on_recovered(TranslationErrorScope.language, self._target_lang)
+
+            try:
+                async for response in self._session.receive():
+                    if self._stopped:
+                        break
+                    server_content = response.server_content
+                    if server_content is None or server_content.model_turn is None:
+                        continue
+                    for part in server_content.model_turn.parts:
+                        if part.inline_data and part.inline_data.data:
+                            data = part.inline_data.data
+                            frame = rtc.AudioFrame(data, _OUTPUT_SAMPLE_RATE, 1, len(data) // 2)
+                            await self._audio_source.capture_frame(frame)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._close_session()
+                if self._stopped:
+                    break
+                await self._handle_reconnect_failure(exc)
+                continue
+            else:
+                await self._close_session()
+                if self._stopped:
+                    break
+                await self._handle_reconnect_failure(RuntimeError("Gemini Live Translate session ended"))
+
+    async def _handle_reconnect_failure(self, exc: Exception) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures == _FAILURE_REPORT_THRESHOLD:
+            logger.error(
+                "Gemini Live Translate session repeatedly failing lang=%s (attempt %d) — reporting",
+                self._target_lang, self._consecutive_failures, exc_info=exc,
+            )
+            if self._on_error is not None:
+                self._on_error(TranslationErrorScope.language, self._target_lang, str(exc))
+        else:
+            logger.warning(
+                "Gemini Live Translate session failed lang=%s attempt=%d — retrying: %s",
+                self._target_lang, self._consecutive_failures, exc,
+            )
+        delay = min(2 ** (self._consecutive_failures - 1), _MAX_BACKOFF_SECONDS)
+        await asyncio.sleep(delay)
+
+    async def _close_session(self) -> None:
+        if self._session_cm is not None:
+            try:
+                await self._session_cm.__aexit__(None, None, None)
+            except Exception:
+                logger.exception("error closing Gemini Live Translate session lang=%s", self._target_lang)
+        self._session = None
+        self._session_cm = None
 
     async def stop(self) -> None:
-        if self._start_task is not None and not self._start_task.done():
+        self._stopped = True
+        if self._start_task is not None:
             self._start_task.cancel()
             try:
                 await self._start_task
             except (asyncio.CancelledError, Exception):
                 pass
 
-        if self._writer_task is not None:
-            self._writer_task.cancel()
-            try:
-                await self._writer_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        await self._close_session()
 
         if self._publication is not None:
             try:
@@ -145,7 +259,7 @@ class LanguageAudioPipeline:
                 logger.exception("error unpublishing dubbed-audio track lang=%s", self._target_lang)
 
         if self._sem_acquired:
-            self._tts_semaphore.release()
+            self._translate_semaphore.release()
             self._sem_acquired = False
 
         logger.info("dubbed-audio pipeline stopped lang=%s", self._target_lang)
@@ -153,63 +267,133 @@ class LanguageAudioPipeline:
 
 class DubbedAudioManager:
     """Per-meeting demand tracker — one `LanguageAudioPipeline` per
-    language currently requested by at least one dubbed_audio participant."""
+    language currently requested by at least one dubbed_audio participant,
+    all fed by the one shared active-speaker audio bridge below."""
 
-    def __init__(self, *, room: rtc.Room, registry: ParticipantRegistry, tts_semaphore: asyncio.Semaphore, queue_maxsize: int):
+    def __init__(
+        self, *, room: rtc.Room, registry: ParticipantRegistry, translate_semaphore: asyncio.Semaphore,
+        on_error=None,  # Callable[[TranslationErrorScope, str, str], None], optional
+        on_recovered=None,  # Callable[[TranslationErrorScope, str], None], optional
+    ):
         self._room = room
         self._registry = registry
-        self._tts_semaphore = tts_semaphore
-        self._queue_maxsize = queue_maxsize
+        self._translate_semaphore = translate_semaphore
+        self._on_error = on_error
+        self._on_recovered = on_recovered
         self._pipelines: dict[str, LanguageAudioPipeline] = {}
+        self._active_speaker_identity: str | None = None
+        self._bridge_task: asyncio.Task | None = None
 
     def sync(self) -> None:
-        # KNOWN LATENT RISK, not hit today: `sync()` is only ever called
-        # when settings.live_agents_captions_enabled is True (see
-        # orchestrator.py's gating on every call site) — while that flag
-        # is False, this method never runs at all. If/when dubbed audio
-        # is re-enabled, note that get_tts_for_language() below is a
-        # SYNCHRONOUS, inline call on the shared event loop (unlike
-        # captions.py's SpeakerSTTSession.start(), which now offloads its
-        # own equivalent provider-construction call via asyncio.to_thread
-        # specifically to avoid this) — a slow/hanging TTS client
-        # constructor here would block the whole server the same way the
-        # STT one used to. `sync()` would need to become async (and its
-        # sync callers in orchestrator.py switched to `asyncio.create_
-        # task(self._dubbed.sync())`) to apply the same fix here.
         needed = self._registry.distinct_dubbed_languages()
         active = set(self._pipelines.keys())
 
+        added_any = False
         for lang in needed - active:
-            tts = get_tts_for_language(lang)
-            if tts is None:
-                logger.warning(
-                    "audio_mode=dubbed_audio requested for lang=%s but it has no TTS provider "
-                    "configured — degrading to captions_only for that language",
-                    lang,
-                )
-                continue
             pipeline = LanguageAudioPipeline(
-                room=self._room, target_lang=lang, tts=tts,
-                queue_maxsize=self._queue_maxsize, tts_semaphore=self._tts_semaphore,
+                room=self._room, target_lang=lang, translate_semaphore=self._translate_semaphore,
+                on_error=self._on_error, on_recovered=self._on_recovered,
             )
             # Registered immediately (before start() has even run), not
             # after — so a stop() issued while this pipeline is still
             # starting can still find it and clean up whatever got as far
-            # as being created (semaphore/track), instead of leaking it.
+            # as being created (semaphore/session/track), instead of
+            # leaking it.
             self._pipelines[lang] = pipeline
             pipeline.launch()
+            added_any = True
 
         for lang in active - needed:
             pipeline = self._pipelines.pop(lang, None)
             if pipeline is not None:
                 asyncio.create_task(pipeline.stop())
 
-    def enqueue_if_active(self, target_lang: str, text: str, *, source_identity: str) -> None:
-        pipeline = self._pipelines.get(target_lang)
-        if pipeline is not None:
-            pipeline.enqueue(text, source_identity=source_identity)
+        # A language becoming the first-ever demand mid-call, after
+        # someone's already been identified as the active speaker, needs
+        # the bridge started for them now — on_active_speakers_changed
+        # only fires on a CHANGE of speaker, which may not happen again
+        # for a while.
+        if added_any and self._bridge_task is None and self._active_speaker_identity is not None:
+            self._start_bridge(self._active_speaker_identity)
+
+    def on_active_speakers_changed(self, speakers: list[rtc.Participant]) -> None:
+        """`speakers` is LiveKit's own ranked, possibly-empty active-
+        speaker list. Ignores the bot's own identity (its dubbed-audio
+        publish tracks are SOURCE_MICROPHONE too, but orchestrator.py
+        never reports the bot as a speaker to begin with — this check is
+        defense in depth, not load-bearing) and re-points the shared
+        bridge at whichever real participant is now first."""
+        new_identity = None
+        for participant in speakers:
+            if participant.identity == settings.live_agents_bot_identity:
+                continue
+            new_identity = participant.identity
+            break
+
+        if new_identity == self._active_speaker_identity:
+            return
+        self._active_speaker_identity = new_identity
+
+        if self._bridge_task is not None:
+            self._bridge_task.cancel()
+            self._bridge_task = None
+
+        if new_identity is None or not self._pipelines:
+            return
+        self._start_bridge(new_identity)
+
+    def _start_bridge(self, identity: str) -> None:
+        participant = self._room.remote_participants.get(identity)
+        if participant is None:
+            return
+        track = None
+        for publication in participant.track_publications.values():
+            if publication.kind == rtc.TrackKind.KIND_AUDIO and publication.source == rtc.TrackSource.SOURCE_MICROPHONE:
+                track = publication.track
+                break
+        if track is None:
+            return
+        self._bridge_task = asyncio.create_task(self._bridge_loop(track, identity))
+
+    async def _bridge_loop(self, track: rtc.Track, identity: str) -> None:
+        audio_stream = rtc.AudioStream(track, sample_rate=_INPUT_SAMPLE_RATE, num_channels=1)
+        try:
+            async for event in audio_stream:
+                pcm_bytes = bytes(event.frame.data)
+                # Skip any pipeline whose target language already matches
+                # what this speaker is speaking — that's a same-language
+                # no-op "translation" nobody asked for (anyone wanting
+                # this language already hears the speaker's raw track),
+                # just wasted Gemini load on every single utterance.
+                # Re-read fresh per frame (not cached at bridge-start) so
+                # a speaker changing their own spoken_language mid-turn
+                # doesn't leave this stale.
+                speaker_settings = self._registry.get(identity)
+                spoken_lang = speaker_settings.spoken_language if speaker_settings else None
+                await asyncio.gather(
+                    *(
+                        pipeline.feed_audio(pcm_bytes)
+                        for lang, pipeline in self._pipelines.items()
+                        if lang != spoken_lang
+                    ),
+                    return_exceptions=True,
+                )
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                await audio_stream.aclose()
+            except Exception:
+                logger.exception("error closing active-speaker audio bridge stream")
 
     async def stop_all(self) -> None:
+        if self._bridge_task is not None:
+            self._bridge_task.cancel()
+            try:
+                await self._bridge_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._bridge_task = None
         for pipeline in list(self._pipelines.values()):
             await pipeline.stop()
         self._pipelines.clear()

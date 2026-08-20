@@ -30,7 +30,7 @@ from app.core.models.staff import RefreshToken, StaffCategory, StaffTier, StaffU
 from app.core.services import audit_service
 from app.core.security.cookies import REFRESH_COOKIE_NAME, clear_refresh_cookie, set_refresh_cookie
 from app.core.security.dependencies import client_ip, require_admin, require_any_staff
-from app.core.security.password import hash_password, verify_password
+from app.core.security.password import hash_password, needs_rehash, verify_password
 from app.core.security.rate_limit import is_locked_out, record_login_attempt
 from app.core.security.tokens import hash_refresh_token
 from app.core.services.token_service import issue_tokens, revoke_refresh_token, rotate_refresh_token
@@ -90,6 +90,11 @@ async def login(req: StaffLoginRequest, request: Request, response: Response, db
     if not valid:
         await db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+
+    if needs_rehash(staff.password_hash):
+        # Refresh the hash with current argon2id parameters now that the
+        # plaintext is available — OWASP-recommended rehash-on-login.
+        staff.password_hash = hash_password(req.password)
 
     await audit_service.record(
         db,

@@ -117,6 +117,22 @@ class Permission(Base):
     own_reply_character: Mapped[str | None] = mapped_column(String(100), nullable=True)
     own_reply_language: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
+    # Tools Registry (see app.core.services.tools_service) — which concrete
+    # service implementation backs each pluggable slot for this identity.
+    # Same own_*/effective_* narrowing-free inheritance as own_reply_* above
+    # (null = inherit from parent, or the staff-set global default at root
+    # — core.tool_global_selection replaces ROOT_DEFAULTS for these fields
+    # only, see profiles/services.py's _compute_effective). The two per-
+    # language slots (meeting_stt/meeting_tts) are JSONB {lang: tool_key}
+    # maps merged key-by-key, not replaced wholesale — see _merge_config_map.
+    # whatsapp_send/video_provider have no own_*/effective_* columns at all:
+    # both are singleton platform infra, never identity-scoped.
+    own_reply_generator_tool: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    own_comms_agent_tool: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    own_meeting_translation_tool: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    own_meeting_stt_tools: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    own_meeting_tts_tools: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     consent_required: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
     effective_registered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -136,6 +152,12 @@ class Permission(Base):
     effective_reply_complexity: Mapped[str] = mapped_column(String(100), nullable=False, default="standard")
     effective_reply_character: Mapped[str] = mapped_column(String(100), nullable=False, default="assistant")
     effective_reply_language: Mapped[str] = mapped_column(String(20), nullable=False, default="en")
+
+    effective_reply_generator_tool: Mapped[str] = mapped_column(String(100), nullable=False, default="stub")
+    effective_comms_agent_tool: Mapped[str] = mapped_column(String(100), nullable=False, default="gemini")
+    effective_meeting_translation_tool: Mapped[str] = mapped_column(String(100), nullable=False, default="gemini")
+    effective_meeting_stt_tools: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    effective_meeting_tts_tools: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 

@@ -22,6 +22,10 @@ class ActorType(str, enum.Enum):
     client = "client"
     client_staff = "client_staff"
     system = "system"
+    # The new orgs.OrgUser system (owner or staff role — see
+    # app.orgs.models.OrgUserRole) — distinct from the legacy client/
+    # client_staff pair since it's a different underlying table.
+    org_user = "org_user"
 
 
 class AuditLog(Base):

@@ -15,10 +15,11 @@ anymore, which is a real resource win on the 1vCPU/2GB droplet (one room
 connection per meeting instead of up to `MAX_TRANSLATE_LANGUAGES`).
 
 Runs embedded in this same FastAPI process (no separate LiveKit Agents
-worker) — `AgentSession.start(room=...)` only needs an already-connected
-`rtc.Room`; this module mints its own bot token and calls `room.connect()`
-itself, exactly like the old `TranslationAgent.run()` did, keeping the
-"single bare uvicorn process on a 1vCPU/2GB droplet" deployment unchanged.
+worker, and — see captions.py's own module docstring — no
+livekit-agents `AgentSession` at all anymore either); this module mints
+its own bot token and calls `room.connect()` itself, exactly like the
+old `TranslationAgent.run()` did, keeping the "single bare uvicorn
+process on a 1vCPU/2GB droplet" deployment unchanged.
 
 In-memory `_running` registry: a backend restart mid-meeting drops
 tracking of any still-running agent along with it — the same accepted
@@ -32,11 +33,11 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from google import genai
 from livekit import api as lk_api
 from livekit import rtc
 
 from app.config import settings
+from app.core.services.tools_service import EffectiveToolConfig
 from app.meeting_room.live_agents.captions import CaptionDispatcher
 from app.meeting_room.live_agents.chat_relay import ChatRelay
 from app.meeting_room.live_agents.dubbed_audio import DubbedAudioManager
@@ -46,6 +47,9 @@ from app.meeting_room.live_agents.participant_attrs import (
     ATTR_SPOKEN_LANGUAGE,
     ParticipantRegistry,
 )
+from app.meeting_room.live_agents import status
+from app.meeting_room.live_agents.status import TranslationErrorScope
+from app.meeting_room.live_agents.translation_backends import get_backend
 from app.meeting_room.live_agents.translator import TranslatorManager
 
 logger = logging.getLogger("live_agents.orchestrator")
@@ -55,33 +59,37 @@ logger = logging.getLogger("live_agents.orchestrator")
 # comments for exactly what each one guards. Deliberately separate from
 # gemini_max_concurrent (the unrelated WhatsApp reply/translation path).
 _stt_semaphore = asyncio.Semaphore(settings.live_agents_max_concurrent_stt_sessions)
-_tts_semaphore = asyncio.Semaphore(settings.live_agents_max_concurrent_tts_pipelines)
+_dubbing_semaphore = asyncio.Semaphore(settings.live_agents_max_concurrent_dubbing_pipelines)
 _translate_semaphore = asyncio.Semaphore(settings.live_agents_max_concurrent_translate_calls)
 
 
 class MeetingLiveAgent:
     """One per meeting."""
 
-    def __init__(self, *, room_name: str, meeting_id: str):
+    def __init__(self, *, room_name: str, meeting_id: str, tool_config: EffectiveToolConfig):
         self._room_name = room_name
         self._meeting_id = meeting_id
         self._room = rtc.Room()
         self._registry = ParticipantRegistry(default_language=settings.live_agents_default_language)
 
-        genai_client = genai.Client(api_key=settings.gemini_api_key)
-        self._translator = TranslatorManager(
-            genai_client=genai_client, model=settings.live_agents_gemini_model, semaphore=_translate_semaphore
-        )
+        # tool_config is the meeting's resolved Tools Registry choice
+        # (services._mark_joined resolves it once, at the scheduled->live
+        # transition — see that function's docstring) — which backend/
+        # provider each of the three pluggable pieces below actually uses.
+        backend = get_backend(tool_config.meeting_translation)
+        self._translator = TranslatorManager(backend=backend, semaphore=_translate_semaphore)
         self._captions = CaptionDispatcher(
             room=self._room,
             registry=self._registry,
             translator=self._translator,
             stt_semaphore=_stt_semaphore,
-            on_translated_segment=self._on_translated_segment,
+            stt_map=tool_config.meeting_stt,
+            on_error=self._on_translation_error,
+            on_recovered=self._on_translation_recovered,
         )
         self._dubbed = DubbedAudioManager(
-            room=self._room, registry=self._registry, tts_semaphore=_tts_semaphore,
-            queue_maxsize=settings.live_agents_dub_queue_maxsize,
+            room=self._room, registry=self._registry, translate_semaphore=_dubbing_semaphore,
+            on_error=self._on_translation_error, on_recovered=self._on_translation_recovered,
         )
         self._chat = ChatRelay(room=self._room, meeting_id=meeting_id, registry=self._registry, translator=self._translator)
 
@@ -93,13 +101,14 @@ class MeetingLiveAgent:
         self._room.on("track_subscribed", self._on_track_subscribed)
         self._room.on("track_unsubscribed", self._on_track_unsubscribed)
         self._room.on("participant_attributes_changed", self._on_participant_attributes_changed)
+        self._room.on("active_speakers_changed", self._on_active_speakers_changed)
         self._room.on("disconnected", self._on_disconnected)
 
     async def run(self) -> None:
         token = (
             lk_api.AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
             .with_identity(settings.live_agents_bot_identity)
-            .with_name("Live Agent")
+            .with_name("Translator")
             .with_grants(
                 lk_api.VideoGrants(
                     room_join=True,
@@ -155,12 +164,39 @@ class MeetingLiveAgent:
     def request_stop(self) -> None:
         self._stopped.set()
 
-    def _on_translated_segment(self, target_lang: str, translated_text: str, source_identity: str) -> None:
-        """Caption text that was just dispatched to a language's caption
-        recipients is also, if that language has active dubbed-audio
-        demand, the exact text to synthesize and enqueue — captions.py and
-        dubbed_audio.py never call Gemini independently of each other."""
-        self._dubbed.enqueue_if_active(target_lang, translated_text, source_identity=source_identity)
+    def _on_translation_error(self, scope: TranslationErrorScope, subject: str, detail: str) -> None:
+        """Fire-and-forget, mirrors every other callback in this class
+        (e.g. `_on_active_speakers_changed`) — captions.py/dubbed_audio.py
+        call this synchronously from inside their own except blocks, so
+        it must never block or raise back into them. Only ever called
+        after a caller's own report threshold is crossed (see
+        dubbed_audio.LanguageAudioPipeline._supervise) — a single
+        transient blip never reaches here at all."""
+        asyncio.create_task(self._report_translation_error(scope, subject, detail))
+
+    async def _report_translation_error(self, scope: TranslationErrorScope, subject: str, detail: str) -> None:
+        # Deliberately does NOT touch translation_active — a per-speaker
+        # or per-language degrade leaves the meeting-level flag True;
+        # only a full agent crash (_log_agent_task_result below) flips it.
+        await status.set_translation_error(self._meeting_id, detail)
+        await status.broadcast_translation_status(self._room, scope=scope, subject=subject, detail=detail)
+
+    def _on_translation_recovered(self, scope: TranslationErrorScope, subject: str) -> None:
+        """Companion to `_on_translation_error` — fired once a session
+        that had actually crossed the report threshold self-heals (see
+        LanguageAudioPipeline._supervise), so a degraded bubble shown
+        earlier clears on its own instead of waiting for a manual
+        dismiss/retry."""
+        asyncio.create_task(self._report_translation_recovered(scope, subject))
+
+    async def _report_translation_recovered(self, scope: TranslationErrorScope, subject: str) -> None:
+        await status.set_translation_error(self._meeting_id, None)
+        await status.broadcast_translation_recovered(self._room, scope=scope, subject=subject)
+
+    def _on_active_speakers_changed(self, speakers: list[rtc.Participant]) -> None:
+        if not settings.live_agents_captions_enabled:
+            return
+        self._dubbed.on_active_speakers_changed(speakers)
 
     def _on_participant_connected(self, participant: rtc.RemoteParticipant) -> None:
         if participant.identity == settings.live_agents_bot_identity:
@@ -219,7 +255,9 @@ class MeetingLiveAgent:
 _running: dict[str, tuple[MeetingLiveAgent, asyncio.Task]] = {}
 
 
-async def start_for_meeting(room_name: str, meeting_id: str, languages: list[str]) -> None:
+async def start_for_meeting(
+    room_name: str, meeting_id: str, languages: list[str], tool_config: EffectiveToolConfig
+) -> None:
     """`languages` (the meeting's own `translate_languages`) is accepted
     for call-shape parity with the old module and stays a meaningful
     per-meeting scheduling-time UX whitelist (see schemas.py), but isn't
@@ -227,16 +265,24 @@ async def start_for_meeting(room_name: str, meeting_id: str, languages: list[str
     `spoken_language`/`caption_language`/`audio_mode` attributes, not a
     pre-declared language list, reactively drive which STT/TTS/translate
     pipelines actually start (see `MeetingLiveAgent.
-    _on_participant_attributes_changed`). Idempotent — a second call for a
-    `meeting_id` already running is a no-op."""
+    _on_participant_attributes_changed`). `tool_config` is this meeting's
+    resolved Tools Registry choice (see `meeting_room.services._mark_joined`,
+    the only caller) — captured once, here, at meeting start; a later
+    config change never affects this already-running agent (see
+    docs/ARCHITECTURE.md's Tools Registry section on effect timing).
+    Idempotent — a second call for a `meeting_id` already running is a
+    no-op (and does not re-resolve `tool_config` for it)."""
     if meeting_id in _running:
         return
 
-    agent = MeetingLiveAgent(room_name=room_name, meeting_id=meeting_id)
+    agent = MeetingLiveAgent(room_name=room_name, meeting_id=meeting_id, tool_config=tool_config)
     task = asyncio.create_task(agent.run())
     task.add_done_callback(lambda t: _log_agent_task_result(t, meeting_id))
     _running[meeting_id] = (agent, task)
-    logger.info("live agent started meeting_id=%s room=%s languages=%s", meeting_id, room_name, languages)
+    logger.info(
+        "live agent started meeting_id=%s room=%s languages=%s tool_config=%s",
+        meeting_id, room_name, languages, tool_config,
+    )
 
 
 def _log_agent_task_result(task: asyncio.Task, meeting_id: str) -> None:
@@ -254,6 +300,17 @@ def _log_agent_task_result(task: asyncio.Task, meeting_id: str) -> None:
     exc = task.exception()
     if exc is not None:
         logger.error("live agent crashed meeting_id=%s — captions/dubbing/chat translation are NOT running for this meeting", meeting_id, exc_info=exc)
+        asyncio.create_task(_report_agent_crash(meeting_id, exc))
+
+
+async def _report_agent_crash(meeting_id: str, exc: BaseException) -> None:
+    # No LiveKit broadcast here — the room connection that just died IS
+    # the channel; the bot disappearing from useParticipants() is the
+    # only live signal a still-connected client gets. translation_active
+    # flipping False (and translation_error being set) is what a client
+    # sees on its next fetch/re-join.
+    await status.set_translation_active(meeting_id, False)
+    await status.set_translation_error(meeting_id, f"Live translation crashed: {exc}")
 
 
 async def stop_for_meeting(meeting_id: str) -> None:

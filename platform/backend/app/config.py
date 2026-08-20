@@ -6,6 +6,7 @@ here — nothing reaches into `os.environ` directly outside this file.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
@@ -44,7 +45,17 @@ class Settings(BaseSettings):
     login_max_attempts: int = 5
     login_lockout_minutes: int = 15
 
-    # Providers
+    # Providers — `translation_provider` is the one env-only switch left
+    # (see `app.core.providers.factory`: it has no callers anywhere in the
+    # app, kept as-is). `whatsapp_provider`/`reply_provider`/
+    # `comms_agent_provider`/`video_provider` below are no longer read at
+    # request time at all — they exist only as the Tools Registry's seed
+    # values (the migration that creates `core.tool_global_selection`
+    # copies these literals in) and as a local dev/test bootstrap default
+    # for a database that hasn't been seeded yet (see
+    # `app.core.services.tools_service._HARDCODED_FALLBACK`). Change the
+    # actual running selection via the Tools Registry (staff Accounts-room
+    # UI or `PUT /api/tools/global/{slot}`), not these fields.
     whatsapp_provider: str = "mock"
     translation_provider: str = "mock"
     reply_provider: str = "stub"
@@ -124,32 +135,58 @@ class Settings(BaseSettings):
     # agnostic, no per-language config needed for it).
     live_agents_bot_identity: str = "unific-agent"
     live_agents_default_language: str = "en"
+    # Google Cloud service-account JSON key path for Speech-to-Text/TTS.
+    # NOT auto-exported to the real OS environment just by being in
+    # `.env` — this app never calls `load_dotenv()`, and pydantic-
+    # settings' `env_file` mechanism only populates declared Settings
+    # fields like this one, it doesn't touch `os.environ` for anything
+    # else. Passed explicitly as `credentials_file` into
+    # `google.STT`/`google.TTS` in providers.py rather than relied on
+    # via ambient `GOOGLE_APPLICATION_CREDENTIALS`/ADC resolution — empty
+    # string here falls through to ADC (e.g. real GCP hosting with a
+    # metadata server, no key file needed at all).
+    google_application_credentials: str = ""
+    # Chirp 3 (Speech-to-Text v2) is NOT available in "global" — confirmed
+    # directly against the live API (a "global" recognizer request 400s
+    # with "The model chirp_3 does not exist in the location named
+    # global"), only in specific regional multi-regions ("us"/"eu" are
+    # GA). See providers.py's get_shared_speech_client/
+    # google_stt_recognizer_path — both build the regional api_endpoint
+    # and recognizer resource path directly from this setting.
+    live_agents_google_stt_location: str = "us"
+    # How aggressively Speech-to-Text v2 decides a pause means "end of
+    # utterance" and finalizes the segment — "standard" (Google's own
+    # default when unset) waited for a full ~23s clip's outer pauses
+    # before ever emitting a single is_final result in direct testing;
+    # "supershort" cut that to ~7.5s to the first caption, segmenting the
+    # same audio into 3 natural pieces instead of one giant block.
+    # "short" is a middle ground. See captions.py's SpeakerSTTSession,
+    # the only place this is read. One of "standard"/"short"/"supershort".
+    live_agents_stt_endpointing_sensitivity: str = "supershort"
     # Master off-switch for captions + dubbed audio, independent of chat
     # translation (which only needs Gemini and is unaffected by this).
-    # Defaults to False FOR NOW — no STT (Deepgram/Azure/Google) or TTS
-    # (Azure) credentials are configured yet, and constructing those SDK
-    # clients without them can synchronously block on network/auth (most
-    # notably Google's client libraries reaching for the GCP metadata
-    # server when no explicit credentials exist) — since this whole app
-    # is one embedded asyncio process, a single blocking call like that
-    # freezes EVERY request the server is handling, not just the caption
-    # pipeline, until the process is restarted. Flip to True once
-    # DEEPGRAM_API_KEY / AZURE_SPEECH_KEY+REGION / GOOGLE_APPLICATION_
-    # CREDENTIALS are actually set up — see orchestrator.py, which is the
-    # only place that reads this.
+    # Defaults to False FOR NOW — no Google STT/TTS credentials are
+    # configured yet, and constructing those SDK clients without them can
+    # synchronously block on network/auth (Google's client libraries reach
+    # for the GCP metadata server when no explicit credentials exist) —
+    # since this whole app is one embedded asyncio process, a single
+    # blocking call like that freezes EVERY request the server is
+    # handling, not just the caption pipeline, until the process is
+    # restarted. Flip to True once GOOGLE_APPLICATION_CREDENTIALS is
+    # actually set up — see orchestrator.py, which is the only place that
+    # reads this.
     live_agents_captions_enabled: bool = False
     # Deliberately separate from gemini_model above (that one backs the
     # WhatsApp reply/translation path) — lets the two be tuned/priced
     # independently even though they may point at the same model today.
     #
-    # NOT "gemini-2.5-flash" — verified live against generate_content with
-    # this project's actual GEMINI_API_KEY (2026-08-18) that model 404s:
-    # "This model models/gemini-2.5-flash is no longer available to new
-    # users. Please update your code to use models/gemini-3.6-flash" — the
-    # exact "listed as available but 404s on generateContent for this key"
-    # trap. gemini-3.6-flash was confirmed working (real translation
-    # output) with a live call before being set here.
-    live_agents_gemini_model: str = "gemini-3.6-flash"
+    # gemini-3.1-flash-lite, per explicit product decision — verified live
+    # against generate_content with this project's actual GEMINI_API_KEY
+    # (2026-08-20), real translation output returned before being set
+    # here. Used for caption/chat TEXT translation only — live dubbed
+    # audio is a separate model entirely (see
+    # live_agents_live_translate_model below).
+    live_agents_gemini_model: str = "gemini-3.1-flash-lite"
 
     # Which of TranslatorManager's two prompt strategies in-call CHAT
     # translation (chat_relay.py only — captions.py is unaffected, it
@@ -169,49 +206,46 @@ class Settings(BaseSettings):
 
     # {language_code: stt_provider_name} — the single source of truth for
     # which languages are selectable at all (see live_agents.providers.
-    # SELECTABLE_LANGUAGES). Sinhala ("si") is intentionally NOT mapped to
-    # "deepgram" — verified against LiveKit's own docs that Deepgram's
-    # supported-language set doesn't include it; Google Cloud Speech
-    # (Chirp 3) does.
-    live_agents_stt_provider_map: str = '{"en": "deepgram", "hi": "deepgram", "si": "google"}'
+    # SELECTABLE_LANGUAGES). Google is the only STT provider (Chirp 3) —
+    # Deepgram/Azure/OpenAI were removed, Google-only is a deliberate
+    # product decision, not a temporary state.
+    live_agents_stt_provider_map: str = '{"en": "google", "hi": "google", "si": "google"}'
     # {language_code: {"provider": ..., "voice": ...}} — a language present
     # in the STT map but absent here still fully supports captions_only;
     # it just can't be selected for audio_mode=dubbed_audio (see
     # live_agents.providers.get_tts_for_language, which returns None rather
-    # than raising for that case).
-    live_agents_tts_provider_map: str = (
-        '{"hi": {"provider": "azure", "voice": "hi-IN-SwaraNeural"},'
-        ' "si": {"provider": "azure", "voice": "si-LK-SameeraNeural"}}'
-    )
+    # than raising for that case). Sinhala ("si") is deliberately NOT
+    # listed here yet: pick a verified si-LK voice from Google Cloud TTS's
+    # current voice catalog (cloud.google.com/text-to-speech/docs/voices)
+    # before adding it — captions_only already works for "si" via the STT
+    # map above regardless.
+    live_agents_tts_provider_map: str = '{"hi": {"provider": "google", "voice": "hi-IN-Standard-A"}}'
 
-    # Deepgram (STT: en, hi via the map above).
-    deepgram_api_key: str = ""
-    # Azure Speech (STT fallback for si; TTS for hi/si) — same two
-    # credentials back both the STT and TTS Azure plugins.
-    azure_speech_key: str = ""
-    azure_speech_region: str = ""
-    # Google Cloud Speech (STT: si, via Chirp 3) reads GOOGLE_APPLICATION_
-    # CREDENTIALS directly from the environment (a GCP service-account JSON
-    # file path) — NOT the same credential as gemini_api_key above. Gemini's
-    # Developer API key and a GCP service account are two unrelated
-    # products/billing relationships; don't conflate them when provisioning.
+    # Google Cloud Speech (STT, via Chirp 3) and Google Cloud TTS both read
+    # GOOGLE_APPLICATION_CREDENTIALS directly from the environment (a GCP
+    # service-account JSON file path) — NOT the same credential as
+    # gemini_api_key above. Gemini's Developer API key and a GCP service
+    # account are two unrelated products/billing relationships; don't
+    # conflate them when provisioning. Never commit the service-account
+    # JSON file itself to the repo.
 
-    # Three independent concurrency caps replacing the old single
-    # live_translation_max_concurrent_sessions semaphore, since the cost
-    # unit is no longer "one persistent Gemini Live session per
-    # (speaker, language)" — it's now three separable things: one STT
-    # session per speaker, one TTS/queue-writer pipeline per active target
-    # language actually in dubbed-audio demand, and stateless Gemini
-    # translate calls per distinct target language per segment/message.
-    # All three tuned for a 1vCPU/2GB droplet — adjust per host.
+    # Three independent concurrency caps, one per separable cost unit:
+    # one direct Google STT streaming session per speaker (captions.py),
+    # one Gemini Live Translate session per active target language
+    # actually in dubbed-audio demand (dubbed_audio.py), and stateless
+    # Gemini text-translate calls per distinct target language per
+    # caption/chat segment (translator.py). All three tuned for a
+    # 1vCPU/2GB droplet — adjust per host.
     live_agents_max_concurrent_stt_sessions: int = 8
-    live_agents_max_concurrent_tts_pipelines: int = 6
+    live_agents_max_concurrent_dubbing_pipelines: int = 6
     live_agents_max_concurrent_translate_calls: int = 8
-    # Per-language dubbed-audio backlog depth — a segment arriving once this
-    # is full is dropped (the newest arrival, not the oldest queued one; see
-    # live_agents.dubbed_audio.LanguageAudioPipeline) rather than left to
-    # grow into ever-more-stale queued audio.
-    live_agents_dub_queue_maxsize: int = 4
+    # gemini-3.5-live-translate-preview — audio-in/audio-out, one session
+    # per active target language (see live_agents/dubbed_audio.py). A
+    # SEPARATE model from live_agents_gemini_model above, which only ever
+    # does text translation for captions/chat — verified live (real
+    # translated audio + transcripts returned) with this project's actual
+    # GEMINI_API_KEY (2026-08-20) before being set here.
+    live_agents_live_translate_model: str = "gemini-3.5-live-translate-preview"
 
     # WhatsApp community agent session cache (app/agents/whatsapp_community).
     # Redis holds same-day conversation turns + per-day counters; Postgres
@@ -223,6 +257,48 @@ class Settings(BaseSettings):
     whatsapp_session_token_cap: int = 1500
     eod_flush_hour_utc: int = 0
     eod_flush_minute_utc: int = 10
+
+    # UNIFIC v2's new WhatsApp pipeline (app/whatsapp/*) — per-org
+    # concurrency + LLM spend caps. The old pipeline above has neither
+    # (single-process, no horizontal scaling); these are enforced via a
+    # Redis sorted-set semaphore / atomic Lua reserve-check specifically
+    # because the arq `worker` service is meant to scale horizontally
+    # (see docs/adr/0002) — an in-process asyncio.Semaphore wouldn't work
+    # across replicas.
+    max_concurrent_whatsapp_sends_per_org: int = 3
+    max_concurrent_llm_calls_per_org: int = 3
+    whatsapp_org_daily_llm_spend_cap_usd: Decimal = Decimal("2.00")
+    # A conservative per-message ceiling (covers up to 4 Gemini calls:
+    # clarify + tone + reply + translate, at flash-lite pricing) reserved
+    # BEFORE the call sequence starts, then trued up via adjust_org_spend
+    # once the real cost is known. Tune against real usage — flagged open
+    # question in docs/PHASE_2_NOTES.md.
+    whatsapp_org_spend_reservation_usd: Decimal = Decimal("0.02")
+    # Self-heal window for a crashed concurrency-slot holder (see
+    # app.whatsapp.session_store.try_acquire_org_slot).
+    whatsapp_concurrency_slot_ttl_seconds: int = 30
+    # Webhook-entry-point idempotency claim TTL — generous, to cover
+    # Meta's own webhook redelivery window (see app.whatsapp.session_store
+    # .claim_provider_message_id, called before either pipeline branches).
+    whatsapp_idempotency_ttl_seconds: int = 86400
+    # arq Worker's own max_jobs — a whole-PROCESS cap across every job
+    # type and every org combined (arq ships no per-org primitive; that's
+    # what the two per-org settings above are for). Not per-org.
+    arq_worker_max_jobs: int = 10
+
+    # UNIFIC v2's new meetings pipeline (app/meetings/*) — live-
+    # translation-agent concurrency cap. Caps how many MeetingLiveAgent
+    # sessions THIS backend replica hosts in-process at once (see
+    # docs/adr/0002's already-accepted single-replica constraint) — NOT
+    # a cap on raw LiveKit video call capacity, which is unaffected.
+    # Global, not per-org (see app.meetings.session_store's docstring).
+    max_concurrent_livekit_sessions: int = 8
+    # Self-heal ceiling for a crashed-process meeting slot reservation
+    # that never called release_meeting_slot — generous, since a live
+    # meeting can legitimately run for hours; NOT heartbeat-renewed this
+    # phase (see app.meetings.session_store's docstring for the gap this
+    # leaves on meetings longer than this).
+    meeting_concurrency_slot_ttl_seconds: int = 21600  # 6h
 
     # General API rate limiting (slowapi, Redis-backed — see app/core/rate_limit.py).
     # The webhook gets its own stricter limit since it's the one unauthenticated

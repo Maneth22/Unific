@@ -68,6 +68,7 @@ class GeminiReplyGenerator(ReplyGenerator):
         room: RoomName,
         agent_name: str,
         chat_history: str = "",
+        member_id: str | None = None,
     ) -> str:
         context_block = "\n".join(f"- {s}" for s in context_snippets) if context_snippets else "(none provided)"
         system_instruction = SYSTEM_TEMPLATE.format(
@@ -91,6 +92,7 @@ class GeminiReplyGenerator(ReplyGenerator):
             room=room,
             agent_name=agent_name,
             identity_id=identity_id,
+            member_id=member_id,
             provider="gemini",
             model=settings.gemini_model,
             action="reply_generation",
@@ -99,7 +101,13 @@ class GeminiReplyGenerator(ReplyGenerator):
             total_tokens=result.total_tokens,
             estimated_cost=result.estimated_cost,
         )
-        if identity_id is not None:
+        # member_id takes priority when both a new- and old-pipeline caller
+        # could theoretically be in play — in practice only one is ever
+        # set (see LlmUsageRecord's CHECK constraint), this is just the
+        # order of preference for which same-day token counter gets it.
+        if member_id is not None:
+            await session_store.incr_token_usage(member_id, result.total_tokens or 0)
+        elif identity_id is not None:
             await session_store.incr_token_usage(identity_id, result.total_tokens or 0)
 
         return result.text or FALLBACK_REPLY

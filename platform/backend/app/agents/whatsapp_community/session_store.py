@@ -21,7 +21,7 @@ EOD flush cron too (see app.config.Settings.eod_flush_hour_utc/minute_utc).
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import redis.asyncio as aioredis
 
@@ -95,7 +95,16 @@ async def _touch_expiry(identity_id: str) -> None:
     same next-UTC-midnight(+buffer) instant — called on every write so a
     session that's still active tonight never expires mid-conversation."""
     r = get_redis()
-    expire_at = int(utcnow().timestamp()) + seconds_until_next_utc_midnight() + _FLUSH_BUFFER_SECONDS
+    # `utcnow()` is a NAIVE datetime (UTC wall-clock value, no tzinfo) —
+    # calling .timestamp() directly on it makes Python interpret it in the
+    # SYSTEM's local timezone, not UTC, silently shifting the computed
+    # epoch by the local UTC offset (e.g. -19800s / -5.5h on a UTC+5:30
+    # host). That's wrong by construction, not just imprecise: outside a
+    # ~5.5h window before UTC midnight this pushed `expire_at` into the
+    # PAST, so Redis deleted every session/token/auto-reply key
+    # immediately on write. Attach tzinfo explicitly before calling
+    # .timestamp() so it's interpreted as the UTC value it actually is.
+    expire_at = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + seconds_until_next_utc_midnight() + _FLUSH_BUFFER_SECONDS
     async with r.pipeline() as pipe:
         pipe.expireat(_session_key(identity_id), expire_at)
         pipe.expireat(_messages_key(identity_id), expire_at)

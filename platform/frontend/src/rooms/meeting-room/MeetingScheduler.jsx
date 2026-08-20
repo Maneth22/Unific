@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import {
   addParticipant, createMeeting, deleteMeeting, endMeeting, getMeeting, getMeetingChat, getTranslationLanguages,
-  joinMeeting, listMeetings,
+  joinMeeting, listMeetings, retryMeetingTranslation,
 } from '../../api/meetingRoom'
 import { listIdentities, listClientOrgIdentities } from '../../api/profiles'
 import { listStaffLite } from '../../api/staffDirectory'
@@ -245,6 +245,8 @@ export default function MeetingScheduler() {
           openInviteUrl={call.open_invite_url}
           onDisconnected={() => setCall(null)}
           fetchChatHistory={() => getMeetingChat(call.meeting_id)}
+          viewerRole="staff"
+          onRetryTranslation={() => retryMeetingTranslation(call.meeting_id)}
         />
       </div>
     )

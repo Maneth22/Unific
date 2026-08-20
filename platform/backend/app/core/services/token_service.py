@@ -31,8 +31,14 @@ async def issue_tokens(
     staff_user_id: str | None = None,
     client_user_id: str | None = None,
     client_staff_user_id: str | None = None,
+    org_user_id: str | None = None,
 ) -> IssuedTokens:
-    subject = {"staff": staff_user_id, "client": client_user_id, "client_staff": client_staff_user_id}[audience]
+    subject = {
+        "staff": staff_user_id,
+        "client": client_user_id,
+        "client_staff": client_staff_user_id,
+        "org": org_user_id,
+    }[audience]
     assert subject is not None
 
     access_token = create_access_token(subject=subject, audience=audience)
@@ -45,6 +51,7 @@ async def issue_tokens(
             staff_user_id=staff_user_id,
             client_user_id=client_user_id,
             client_staff_user_id=client_staff_user_id,
+            org_user_id=org_user_id,
             expires_at=expires_at,
         )
     )
@@ -82,14 +89,17 @@ async def rotate_refresh_token(db: AsyncSession, raw_token: str) -> tuple[Refres
         audience: TokenAudience = "staff"
     elif existing.client_user_id:
         audience = "client"
-    else:
+    elif existing.client_staff_user_id:
         audience = "client_staff"
+    else:
+        audience = "org"
     new_tokens = await issue_tokens(
         db,
         audience=audience,
         staff_user_id=existing.staff_user_id,
         client_user_id=existing.client_user_id,
         client_staff_user_id=existing.client_staff_user_id,
+        org_user_id=existing.org_user_id,
     )
 
     existing.revoked_at = utcnow()
@@ -116,8 +126,10 @@ async def _revoke_all_for_subject(db: AsyncSession, token: RefreshToken) -> None
         column, value = RefreshToken.staff_user_id, token.staff_user_id
     elif token.client_user_id:
         column, value = RefreshToken.client_user_id, token.client_user_id
-    else:
+    elif token.client_staff_user_id:
         column, value = RefreshToken.client_staff_user_id, token.client_staff_user_id
+    else:
+        column, value = RefreshToken.org_user_id, token.org_user_id
     result = await db.execute(select(RefreshToken).where(column == value, RefreshToken.revoked_at.is_(None)))
     for row in result.scalars().all():
         row.revoked_at = utcnow()

@@ -12,11 +12,20 @@ import { CAPTION_TEXT_TOPIC, TRANSCRIBED_TRACK_ID_ATTR } from './callConstants'
 // by sender identity). Only the single most-recent line is kept, replaced
 // wholesale on each new one — no scrollback, matching the backend's
 // "flush the whole turn in one message" design (captions are segmented
-// on VAD end-of-turn, not streamed word by word).
+// on end-of-utterance, not streamed word by word).
+//
+// A line clears itself CAPTION_DISPLAY_MS after arriving, rather than
+// sitting on screen indefinitely until the next one — the backend has no
+// concept of "still talking" vs. "done" beyond emitting the next
+// segment, which (especially with a real pause between sentences) could
+// be many seconds away or, at the end of a speaker's turn, never.
+const CAPTION_DISPLAY_MS = 6000
+
 export default function CaptionBar({ captionLanguage }) {
   const room = useRoomContext()
   const participants = useParticipants()
   const [caption, setCaption] = useState(null) // { speakerName, text } | null
+  const clearTimerRef = useRef(null)
 
   // Kept in a ref (not a handler dependency) so the text-stream handler
   // below always sees the current participant list without needing to be
@@ -31,6 +40,7 @@ export default function CaptionBar({ captionLanguage }) {
   // the line on screen was in the old language and would otherwise sit
   // there stale until the next segment arrives in the new one.
   useEffect(() => {
+    clearTimeout(clearTimerRef.current)
     setCaption(null)
   }, [captionLanguage])
 
@@ -45,10 +55,17 @@ export default function CaptionBar({ captionLanguage }) {
         ? participantsRef.current.find((p) => p.trackPublications.has(trackId))
         : undefined
       setCaption({ speakerName: speaker?.name || speaker?.identity || 'Someone', text })
+      // Each new line gets its own full 6s window — an in-progress timer
+      // from the previous line must not fire early and clear this one.
+      clearTimeout(clearTimerRef.current)
+      clearTimerRef.current = setTimeout(() => setCaption(null), CAPTION_DISPLAY_MS)
     }
 
     room.registerTextStreamHandler(CAPTION_TEXT_TOPIC, handler)
-    return () => room.unregisterTextStreamHandler(CAPTION_TEXT_TOPIC)
+    return () => {
+      room.unregisterTextStreamHandler(CAPTION_TEXT_TOPIC)
+      clearTimeout(clearTimerRef.current)
+    }
   }, [room])
 
   if (!caption) return null

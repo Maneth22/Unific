@@ -224,12 +224,107 @@ before this section existed.
 because Resources (external data gathering) and Assets (building things
 from held data) will need identically-shaped external connectors — a
 provider ABC, a mock implementation for development, and a real
-implementation gated behind env config. `app.core.providers.factory`
-is the one place that reads which implementation is selected; nothing else
-should import a concrete provider class directly. `MockWhatsAppProvider`
+implementation gated behind env config. `MockWhatsAppProvider`
 deliberately simulates occasional failures (`ProviderError`) so a room's
 error handling is proven before real credentials exist — do the same for
 any new provider.
+
+`app.core.providers.factory` used to be "the one place that reads which
+implementation is selected" for every provider ABC. As of the Tools
+Registry (below), that's only still true for `TranslationProvider`, which
+has no callers anywhere in the app and was deliberately left alone —
+`WhatsAppProvider`/`ReplyGenerator`/`CommsAgent`/`VideoProvider` selection
+now goes through `app.core.services.tools_service`, not `factory.py`.
+
+**Status**: `ReplyGenerator` is real as of the Tools Registry's
+`reply_generator` slot set to `"gemini"` — see `gemini_reply_generator.py`,
+built on the shared rate-limited wrapper in `gemini_client.py`. The reply
+generator is prompt-constrained to only use the `context_snippets` it's
+given (Shelf 1, `approved_for_auto_reply=True`) and returns the
+deterministic fallback rather than guessing when nothing relevant is
+found. `WhatsAppProvider`'s `cloud_api` implementation (`cloud_api_whatsapp.py`)
+is wired and catalogued but its production credentials/exercise against
+the real Cloud API is deployment-specific. Every provider call in the
+message pipeline (`meeting_room/services.py`) is wrapped so a
+`ProviderError` — including "Gemini is not configured" when
+`GEMINI_API_KEY` is unset — degrades to a safe fallback (the stub reply,
+or untranslated text) rather than crashing the pipeline; see the
+try/except blocks in `receive_inbound_message` / `_auto_reply` /
+`send_manual_reply`.
+
+## Tools Registry — admin-switchable service providers
+
+Every pluggable "which concrete service backend handles X" decision in the
+app is a **slot** (`app.core.models.tools.ToolSlot`): `whatsapp_send`,
+`reply_generator`, `comms_agent`, `video_provider`, and the three
+live-meeting pieces `meeting_stt`/`meeting_tts`/`meeting_translation` (the
+last three per-language where relevant). Historically each was a single
+`.env` string read once at process boot (`app.core.providers.factory`,
+`@lru_cache`d) — changing one meant an edit + restart. The Tools Registry
+replaces that with a DB-backed, runtime-switchable choice, with **zero
+behavior change on deploy** (the seed migration copies today's `.env`
+defaults verbatim into the new tables).
+
+Two new `core`-schema tables (`app/core/models/tools.py`):
+- `core.tool_catalog_entry` — the admin-visible metadata layer: what's
+  known to exist per slot (display name, backing pip package — its
+  *version* is read live via `importlib.metadata`, never stored), and a
+  staff on/off switch (`is_enabled`). This is **not** the thing that
+  decides whether a `tool_key` actually works — see below.
+- `core.tool_global_selection` — the staff-editable system-wide default:
+  the *only* selection for `whatsapp_send`/`video_provider` (both are
+  singleton platform infra — one WhatsApp Business number, one LiveKit
+  deployment — never per-client-org), and the new admin-editable
+  root-of-cascade default for the other five slots, replacing
+  `profiles.services.ROOT_DEFAULTS` for tool fields only.
+
+The other five slots cascade through the exact same `profiles.permission`
+`own_*`/`effective_*` mechanism already used for reply role/tone/complexity/
+character/language (see "The identity tree" above) — five new field pairs,
+merged via `_merge_config`/`_merge_config_map` (the latter for the two
+per-language JSONB slots, merged key-by-key so overriding one language
+never clobbers another). A client-org root setting its own choice cascades
+to every descendant community/member unless one of them sets its own
+override — "department basis": staff's global default governs every staff
+meeting and untouched trees; a client admin's choice governs their entire
+organization.
+
+`app.core.services.tools_registry` is the **code-level** authority on
+what actually works — a plain `dict[ToolSlot, dict[tool_key, factory]]`
+for the four slots it owns directly (`whatsapp_send`/`reply_generator`/
+`comms_agent`/`video_provider`); the three meeting-room slots are
+delegated to `app.meeting_room.live_agents` (`providers.py`'s
+`STT_FACTORIES`/`TTS_FACTORIES`, and `translation_backends.py`'s small
+registry) since `core` must never import a room package. A catalog row
+with no matching code-side factory is a logged inconsistency, never a
+silent substitution — `tools_service.set_global_selection`/
+`set_own_selection` both validate against the catalog (`is_enabled`) AND
+the code registry before writing anything.
+
+`app.core.services.tools_service` is the `db`-aware resolve/read/write
+layer: `resolve_effective_tools(db, identity_id)` (or `None` for a
+`meeting_kind="staff"` meeting) returns one `EffectiveToolConfig` snapshot;
+`get_tool_instance(slot, tool_key)` caches constructed instances keyed by
+`(slot, tool_key)` — not by slot alone, since two different identities can
+resolve the same slot to two different tools at once, which the old
+per-slot `@lru_cache` couldn't represent.
+
+**Effect timing**: a config change only ever affects the *next* meeting/
+session, never one already running — `meeting_room.services._mark_joined`
+resolves `EffectiveToolConfig` exactly once, at the `scheduled -> live`
+transition, and hands it to `live_agents.start_for_meeting` /
+`MeetingLiveAgent`, which is itself constructed fresh exactly once per
+meeting. The WhatsApp side resolves per-inbound-message (inside
+`orchestrator.receive_inbound_message`, keyed by that message's own linked
+identity) rather than once per webhook HTTP request, since one payload can
+carry messages for several identities with different effective choices.
+
+API: staff routes at `/api/tools/*` (`require_admin`), client routes at
+`/api/tools/client/*` (`require_identity_scope()`, same gate every other
+client-facing identity write uses) — see `app.core.tools_router`. Frontend:
+the Accounts room's "Tools Registry" tab (staff: catalog + global defaults
++ any identity's override) and the client dashboard's Accounts page
+"Tools" section (their own org only, the five cascading slots only).
 
 **Status**: `ReplyGenerator` and `TranslationProvider` are real as of
 `REPLY_PROVIDER=gemini` / `TRANSLATION_PROVIDER=gemini` (the default) —

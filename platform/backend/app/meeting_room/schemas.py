@@ -167,6 +167,11 @@ class MeetingOut(BaseModel):
     room_name: str
     started_at: datetime | None
     ended_at: datetime | None
+    # Whether the live-translation agent actually started/is running for
+    # this meeting — public-safe (no detail about *why* it isn't), see
+    # live_agents/status.py. False for a meeting that never had
+    # translate_live at all, not just one where it failed.
+    translation_active: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -196,6 +201,17 @@ class MeetingDetailOut(MeetingOut):
     # None only if the meeting predates this feature and somehow has no
     # open invite yet.
     open_invite_url: str | None = None
+
+
+class MeetingStaffDetailOut(MeetingDetailOut):
+    """Staff-only — adds the raw failure reason behind a False/degraded
+    `translation_active`. Deliberately NOT on the shared `MeetingDetailOut`
+    (used by both staff's and the client dashboard's meeting-detail
+    routes) — a raw exception string must never reach a client response,
+    see live_agents/status.py's own staff-only detail-topic split for the
+    same boundary applied to the live in-call signal."""
+
+    translation_error: str | None = None
 
 
 class ClientJoinRequest(BaseModel):
@@ -262,6 +278,10 @@ class JoinResponse(BaseModel):
     # participant re-share it from inside the call (CallControlBar's
     # "Invite" button), not just from the scheduler UI.
     open_invite_url: str | None = None
+    # Lets the call UI render the Translator participant's initial state
+    # before any lk.translation_status message arrives (or at all, for a
+    # meeting where translate_live is False). See MeetingOut's own field.
+    translation_active: bool = False
 
 
 class PublicMeetingInfoOut(BaseModel):

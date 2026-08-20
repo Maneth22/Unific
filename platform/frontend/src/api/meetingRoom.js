@@ -20,6 +20,10 @@ export const getMeeting = (id) => apiClient.get(`/meeting-room/meetings/${id}`).
 export const createMeeting = (payload) => apiClient.post('/meeting-room/meetings', payload).then((r) => r.data)
 export const joinMeeting = (id) => apiClient.post(`/meeting-room/meetings/${id}/join`).then((r) => r.data)
 export const endMeeting = (id) => apiClient.post(`/meeting-room/meetings/${id}/end`).then((r) => r.data)
+// Re-attempts starting live translation for a meeting whose pipeline
+// failed or crashed — any staff account that's a participant on this
+// meeting, not just admins (see TranslatorParticipant.jsx's Retry button).
+export const retryMeetingTranslation = (id) => apiClient.post(`/meeting-room/meetings/${id}/translation/retry`).then((r) => r.data)
 export const deleteMeeting = (id) => apiClient.delete(`/meeting-room/meetings/${id}`).then((r) => r.data)
 // Adds one more identity or staff participant to an already-scheduled/live
 // meeting — payload is { identity_id } or { staff_user_id }, exactly one set.

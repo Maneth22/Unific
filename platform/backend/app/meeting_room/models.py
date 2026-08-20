@@ -141,6 +141,20 @@ class Meeting(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Whether the live-translation agent actually started/is currently
+    # running for this meeting — set at the scheduled->live transition
+    # (services._mark_joined) and on every retry (services.
+    # retry_live_translation), and flipped back to False by a full agent
+    # crash (live_agents/status.py's set_translation_active, called from
+    # orchestrator.py's _report_agent_crash). Never re-derived from
+    # translate_live — a meeting can have translate_live=True and
+    # translation_active=False if startup failed.
+    translation_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # The raw reason behind a False/degraded translation_active — staff-
+    # only (see schemas.MeetingStaffDetailOut). None when translation is
+    # active or was never attempted.
+    translation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     participants: Mapped[list["MeetingParticipant"]] = relationship(
         back_populates="meeting", cascade="all, delete-orphan"
     )

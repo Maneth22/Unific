@@ -35,8 +35,9 @@ from app.config import settings
 from app.core.models.archive import ArchiveItemStatus, ArchiveShelf
 from app.core.models.audit import ActorType
 from app.core.models.common import RoomName
+from app.core.models.tools import ToolSlot
 from app.core.providers.base import CommsAgent, OutboundTranslation, ProviderError, ReplyGenerator, WhatsAppProvider
-from app.core.services import archive_service, audit_service, gate_service, spend_service
+from app.core.services import archive_service, audit_service, gate_service, spend_service, tools_service
 from app.meeting_room import services as meeting_room_services
 from app.meeting_room.models import Conversation, WhatsAppLink
 from app.meeting_room.phone_utils import normalize_phone
@@ -222,8 +223,6 @@ async def receive_inbound_message(
     from_phone: str,
     text: str,
     provider_message_id: str,
-    comms_agent: CommsAgent,
-    reply_generator: ReplyGenerator,
     whatsapp_provider: WhatsAppProvider,
 ) -> InboundResult:
     from_phone = normalize_phone(from_phone)
@@ -240,6 +239,17 @@ async def receive_inbound_message(
         # Soft-deleted (see profiles.services.deactivate_identity) — same
         # dead-end as an unlinked number, not an error.
         raise Bounced(f"Identity {identity.id} has been deleted")
+
+    # Resolved per-identity (this message's own linked identity), not a
+    # caller-supplied singleton — one webhook payload can carry messages
+    # for several distinct identities, each with its own effective Tools
+    # Registry choice. perm is already loaded above, so this is a plain
+    # in-process cache lookup (tools_service.get_tool_instance), no extra
+    # query.
+    comms_agent: CommsAgent = tools_service.get_tool_instance(ToolSlot.comms_agent, perm.effective_comms_agent_tool)
+    reply_generator: ReplyGenerator = tools_service.get_tool_instance(
+        ToolSlot.reply_generator, perm.effective_reply_generator_tool
+    )
 
     try:
         await gate_service.check_and_charge(

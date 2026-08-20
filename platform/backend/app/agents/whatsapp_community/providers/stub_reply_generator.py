@@ -27,6 +27,7 @@ class StubReplyGenerator(ReplyGenerator):
         room: RoomName,
         agent_name: str,
         chat_history: str = "",
+        member_id: str | None = None,
     ) -> str:
         if not context_snippets:
             return FALLBACK_REPLY

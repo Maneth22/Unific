@@ -35,6 +35,7 @@ class GeminiCommsAgent(CommsAgent):
         agent_name: str,
         max_output_tokens: int,
         temperature: float = 0.3,
+        member_id: str | None = None,
     ) -> dict:
         result: GeminiResult = await generate(
             system_instruction="You are a precise agent that outputs only raw JSON objects, never markdown fences or commentary.",
@@ -47,6 +48,7 @@ class GeminiCommsAgent(CommsAgent):
             room=room,
             agent_name=agent_name,
             identity_id=identity_id,
+            member_id=member_id,
             provider="gemini",
             model=settings.gemini_model,
             action=action,
@@ -55,7 +57,11 @@ class GeminiCommsAgent(CommsAgent):
             total_tokens=result.total_tokens,
             estimated_cost=result.estimated_cost,
         )
-        if identity_id is not None:
+        # member_id takes priority — see gemini_reply_generator.py's
+        # identical comment; in practice at most one of the two is ever set.
+        if member_id is not None:
+            await session_store.incr_token_usage(member_id, result.total_tokens or 0)
+        elif identity_id is not None:
             await session_store.incr_token_usage(identity_id, result.total_tokens or 0)
         parsed = parse_json_block(result.text)
         if parsed is None:
@@ -67,12 +73,13 @@ class GeminiCommsAgent(CommsAgent):
         return parsed
 
     async def clarify_inbound(
-        self, db: AsyncSession, text: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, text: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> InboundClarification:
         prompt = comms_prompts.CLARIFICATION_PROMPT.format(original_text=text)
         parsed = await self._call(
             db, prompt=prompt, action="clarification", identity_id=identity_id, room=room,
-            agent_name=agent_name, max_output_tokens=600,
+            agent_name=agent_name, max_output_tokens=600, member_id=member_id,
         )
         return InboundClarification(
             detected_language=parsed.get("detected_language", "Unknown"),
@@ -89,11 +96,12 @@ class GeminiCommsAgent(CommsAgent):
         identity_id: str | None,
         room: RoomName,
         agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         prompt = comms_prompts.TONE_ANALYSIS_PROMPT.format(detected_language=detected_language, original_text=text)
         return await self._call(
             db, prompt=prompt, action="tone_analysis", identity_id=identity_id, room=room,
-            agent_name=agent_name, max_output_tokens=400,
+            agent_name=agent_name, max_output_tokens=400, member_id=member_id,
         )
 
     async def translate_outbound(
@@ -108,6 +116,7 @@ class GeminiCommsAgent(CommsAgent):
         identity_id: str | None,
         room: RoomName,
         agent_name: str,
+        member_id: str | None = None,
     ) -> OutboundTranslation:
         language = (target_language or "auto").strip().lower()
         if language in ("auto", ""):
@@ -126,7 +135,7 @@ class GeminiCommsAgent(CommsAgent):
         )
         parsed = await self._call(
             db, prompt=prompt, action="outbound_translation", identity_id=identity_id, room=room,
-            agent_name=agent_name, max_output_tokens=700,
+            agent_name=agent_name, max_output_tokens=700, member_id=member_id,
         )
         translated = parsed.get("translated_text") or text
         key_points = parsed.get("key_points") or []
@@ -139,28 +148,31 @@ class GeminiCommsAgent(CommsAgent):
         )
 
     async def generate_session_report(
-        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         prompt = comms_prompts.SESSION_REPORT_PROMPT.format(transcript=transcript)
         return await self._call(
             db, prompt=prompt, action="session_report", identity_id=identity_id, room=room,
-            agent_name=agent_name, max_output_tokens=800,
+            agent_name=agent_name, max_output_tokens=800, member_id=member_id,
         )
 
     async def generate_satisfaction_analysis(
-        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         prompt = comms_prompts.SATISFACTION_ANALYSIS_PROMPT.format(transcript=transcript)
         return await self._call(
             db, prompt=prompt, action="satisfaction_analysis", identity_id=identity_id, room=room,
-            agent_name=agent_name, max_output_tokens=800,
+            agent_name=agent_name, max_output_tokens=800, member_id=member_id,
         )
 
     async def generate_member_summary(
-        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str
+        self, db: AsyncSession, transcript: str, *, identity_id: str | None, room: RoomName, agent_name: str,
+        member_id: str | None = None,
     ) -> dict:
         prompt = comms_prompts.MEMBER_SUMMARY_PROMPT.format(transcript=transcript)
         return await self._call(
             db, prompt=prompt, action="member_summary", identity_id=identity_id, room=room,
-            agent_name=agent_name, max_output_tokens=800,
+            agent_name=agent_name, max_output_tokens=800, member_id=member_id,
         )

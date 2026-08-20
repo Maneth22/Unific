@@ -21,8 +21,9 @@ from app.agents.whatsapp_community.session_store import append_turn_if_session_a
 from app.config import settings
 from app.core.models.audit import ActorType
 from app.core.models.common import RoomName, utcnow, uuid_str
+from app.core.models.tools import ToolSlot
 from app.core.providers.base import CommsAgent, ProviderError, VideoProvider, WhatsAppProvider
-from app.core.services import audit_service, calendar_service, spend_service
+from app.core.services import audit_service, calendar_service, spend_service, tools_service
 from app.meeting_room import live_agents
 from app.meeting_room.models import (
     Conversation,
@@ -236,7 +237,6 @@ async def send_manual_reply(
     text: str,
     actor_type: ActorType,
     actor_id: str | None,
-    comms_agent: CommsAgent,
     whatsapp_provider: WhatsAppProvider,
 ) -> Message:
     if len(text) > MAX_MESSAGE_LENGTH:
@@ -249,6 +249,11 @@ async def send_manual_reply(
     link = link_result.scalar_one_or_none()
     if link is None:
         raise MeetingRoomError("No WhatsApp number linked to this conversation")
+
+    # Resolved per-identity, not a caller-supplied singleton — perm is
+    # already loaded above, so this is a plain in-process cache lookup
+    # (tools_service.get_tool_instance), no extra query.
+    comms_agent: CommsAgent = tools_service.get_tool_instance(ToolSlot.comms_agent, perm.effective_comms_agent_tool)
 
     translation = await _outbound_translation(
         db, conversation=conversation, perm=perm, english_text=text, comms_agent=comms_agent
@@ -337,13 +342,13 @@ async def generate_report(
     *,
     conversation_id: str,
     report_type: ReportType,
-    comms_agent: CommsAgent,
     actor_type: ActorType,
     actor_id: str | None,
 ) -> SessionReport:
     conversation = await db.get(Conversation, conversation_id)
     if conversation is None:
         raise MeetingRoomError("Conversation not found")
+    comms_agent = await tools_service.get_tool_for_identity(db, ToolSlot.comms_agent, conversation.identity_id)
 
     result = await db.execute(
         select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at)
@@ -819,13 +824,24 @@ async def _mark_joined(
         if meeting.translate_live:
             # Best-effort, same philosophy as the LiveKit room calls below —
             # a translation-agent startup failure shouldn't block the first
-            # participant from actually joining the call.
+            # participant from actually joining the call. This is the ONE
+            # place a meeting's Tools Registry choice (which STT/TTS/
+            # translation backend it uses) is resolved — captured once, at
+            # the scheduled->live transition, and never re-resolved for
+            # this meeting again (see live_agents.start_for_meeting's
+            # docstring on effect timing).
             try:
+                tool_config = await tools_service.resolve_effective_tools(db, meeting.host_identity_id)
                 await live_agents.start_for_meeting(
-                    room_name=meeting.room_name, meeting_id=meeting.id, languages=meeting.translate_languages
+                    room_name=meeting.room_name, meeting_id=meeting.id, languages=meeting.translate_languages,
+                    tool_config=tool_config,
                 )
-            except Exception:
+                meeting.translation_active = True
+                meeting.translation_error = None
+            except Exception as exc:
                 logger.exception("failed to start live translation meeting_id=%s", meeting.id)
+                meeting.translation_active = False
+                meeting.translation_error = str(exc)
     await audit_service.record(
         db,
         actor_type=actor_type,
@@ -836,6 +852,51 @@ async def _mark_joined(
         entity_id=meeting.id,
     )
     await db.flush()
+
+
+async def retry_live_translation(
+    db: AsyncSession, *, meeting_id: str, actor_type: ActorType, actor_id: str | None
+) -> Meeting:
+    """Every failure inside the live-translation pipeline degrades
+    permanently until something re-triggers `start_for_meeting` — nothing
+    ever does that on its own (see live_agents.orchestrator's module
+    docstring). This is that re-trigger: stop whatever's currently
+    running for this meeting (a no-op if nothing is), then start fresh,
+    re-resolving the Tools Registry choice exactly like `_mark_joined`
+    does at the original scheduled->live transition."""
+    meeting = await db.get(Meeting, meeting_id)
+    if meeting is None:
+        raise MeetingRoomError("Meeting not found")
+    if meeting.status != MeetingStatus.live:
+        raise MeetingRoomError("Live translation can only be retried for a meeting that is currently live")
+    if not meeting.translate_live:
+        raise MeetingRoomError("This meeting does not have live translation enabled")
+
+    await live_agents.stop_for_meeting(meeting.id)
+    try:
+        tool_config = await tools_service.resolve_effective_tools(db, meeting.host_identity_id)
+        await live_agents.start_for_meeting(
+            room_name=meeting.room_name, meeting_id=meeting.id, languages=meeting.translate_languages,
+            tool_config=tool_config,
+        )
+        meeting.translation_active = True
+        meeting.translation_error = None
+    except Exception as exc:
+        logger.exception("live translation retry failed meeting_id=%s", meeting.id)
+        meeting.translation_active = False
+        meeting.translation_error = str(exc)
+
+    await audit_service.record(
+        db,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        action="meeting_room.meeting.translation_retry",
+        room=RoomName.meeting_room,
+        entity_type="meeting",
+        entity_id=meeting.id,
+    )
+    await db.flush()
+    return meeting
 
 
 def _assert_joinable(meeting: Meeting) -> None:

@@ -14,8 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts import schemas, whatsapp_service
 from app.core.models.staff import StaffUser
-from app.core.providers.factory import get_whatsapp_provider
+from app.core.models.tools import ToolSlot
 from app.core.security.dependencies import require_admin
+from app.core.services import tools_service
 from app.database import get_db
 
 router = APIRouter(prefix="/api/whatsapp", tags=["whatsapp"])
@@ -28,7 +29,7 @@ async def send_whatsapp_message(
     req: schemas.WhatsAppSendRequest, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)
 ):
     result = await whatsapp_service.send_text(
-        db, to=req.to, message=req.message, whatsapp_provider=get_whatsapp_provider()
+        db, to=req.to, message=req.message, whatsapp_provider=await tools_service.get_global_tool(db, ToolSlot.whatsapp_send)
     )
     await db.commit()
     return result

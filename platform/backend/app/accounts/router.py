@@ -20,9 +20,9 @@ from app.core.models.archive import ArchiveShelf
 from app.core.models.audit import ActorType
 from app.core.models.common import RoomName
 from app.core.models.staff import StaffUser
-from app.core.providers.factory import get_whatsapp_provider
+from app.core.models.tools import ToolSlot
 from app.core.security.dependencies import client_ip, require_admin
-from app.core.services import archive_service, calendar_service, llm_usage_service, webhook_log_service
+from app.core.services import archive_service, calendar_service, llm_usage_service, tools_service, webhook_log_service
 from app.database import get_db
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
@@ -343,7 +343,7 @@ async def whatsapp_test_send(
             text=req.text,
             template_name=req.template_name,
             template_params=req.template_params,
-            whatsapp_provider=get_whatsapp_provider(),
+            whatsapp_provider=await tools_service.get_global_tool(db, ToolSlot.whatsapp_send),
         )
     except whatsapp_service.WhatsAppDiagnosticsError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -352,8 +352,8 @@ async def whatsapp_test_send(
 
 
 @router.get("/whatsapp/webhook-status", response_model=schemas.WhatsAppWebhookStatusOut)
-async def whatsapp_webhook_status(staff: StaffUser = Depends(admin)):
-    return await whatsapp_service.get_webhook_status(get_whatsapp_provider())
+async def whatsapp_webhook_status(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
+    return await whatsapp_service.get_webhook_status(await tools_service.get_global_tool(db, ToolSlot.whatsapp_send))
 
 
 @router.get("/whatsapp/webhook-log", response_model=list[schemas.WebhookLogOut])

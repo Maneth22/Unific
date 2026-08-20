@@ -38,8 +38,7 @@ import json
 import logging
 import re
 
-from google import genai
-from google.genai import types
+from app.meeting_room.live_agents.translation_backends import LiveTranslationBackend
 
 logger = logging.getLogger("live_agents.translator")
 
@@ -139,17 +138,22 @@ def detect_informal_style(text: str) -> str | None:
 
 class TranslatorManager:
     """One instance per meeting (see orchestrator.py) — `translate()` is
-    stateless per call (Gemini text generation has no session to keep
-    open), so "caching one translator instance per active target
+    stateless per call (the backend's completion call has no session to
+    keep open), so "caching one translator instance per active target
     language" concretely means caching the system-prompt STRING per
     (source, target) pair, not a persistent connection. Bounded by a
     shared `asyncio.Semaphore` so a translation burst across many
     distinct target languages can't overrun the process — see
-    `settings.live_agents_max_concurrent_translate_calls`."""
+    `settings.live_agents_max_concurrent_translate_calls`.
 
-    def __init__(self, *, genai_client: genai.Client, model: str, semaphore: asyncio.Semaphore):
-        self._client = genai_client
-        self._model = model
+    `backend` is the Tools Registry's `meeting_translation` selection
+    (see `translation_backends.py`) — this class never talks to Gemini or
+    any other LLM API directly, only through `backend.generate()`, so
+    which LLM actually answers is entirely the caller's (orchestrator.py's)
+    choice."""
+
+    def __init__(self, *, backend: LiveTranslationBackend, semaphore: asyncio.Semaphore):
+        self._backend = backend
         self._semaphore = semaphore
         self._prompt_cache: dict[tuple[str, str], str] = {}
 
@@ -195,67 +199,53 @@ class TranslatorManager:
 
     async def _attempt_generic(self, text: str, source_lang: str, target_lang: str) -> str | None:
         """The original single-pair prompt (PROMPT_TEMPLATE). Returns None
-        (never the original text) on any failure so `translate()` can tell
-        "this attempt didn't produce anything" apart from "this attempt
-        legitimately translated to the same text"."""
-        try:
-            async with self._semaphore:
-                response = await self._client.aio.models.generate_content(
-                    model=self._model,
-                    contents=text,
-                    config=types.GenerateContentConfig(system_instruction=self._prompt_for(source_lang, target_lang)),
-                )
-            translated = (response.text or "").strip()
-            if translated:
-                return translated
-            logger.warning(
-                "generic Gemini translation returned empty source=%s target=%s — trying the other strategy",
-                source_lang, target_lang,
+        (never the original text) on any failure — including a backend
+        call failure, which `backend.generate()` itself already catches
+        and reports as `None` — so `translate()` can tell "this attempt
+        didn't produce anything" apart from "this attempt legitimately
+        translated to the same text"."""
+        async with self._semaphore:
+            translated = await self._backend.generate(
+                text=text, system_instruction=self._prompt_for(source_lang, target_lang), json_mode=False
             )
-        except Exception:
-            logger.exception(
-                "generic Gemini translation failed source=%s target=%s — trying the other strategy",
-                source_lang, target_lang,
-            )
+        if translated:
+            return translated
+        logger.warning(
+            "generic translation returned nothing source=%s target=%s — trying the other strategy",
+            source_lang, target_lang,
+        )
         return None
 
     async def _attempt_specialized(self, text: str, source_lang: str, target_lang: str) -> str | None:
-        """Per-source-language prompt (FALLBACK_PROMPTS) that asks Gemini
-        for both other languages at once as JSON, after first checking
-        whether `text` actually reads as romanized Sinhala/Hindi rather
-        than the claimed `source_lang` (see detect_informal_style) — a
-        participant's registered language is a UI setting, not proof of
-        what script they're actually typing in. Returns None on any
+        """Per-source-language prompt (FALLBACK_PROMPTS) that asks the
+        backend for both other languages at once as JSON, after first
+        checking whether `text` actually reads as romanized Sinhala/Hindi
+        rather than the claimed `source_lang` (see detect_informal_style)
+        — a participant's registered language is a UI setting, not proof
+        of what script they're actually typing in. Returns None on any
         failure, same contract as `_attempt_generic` above."""
         effective_source = detect_informal_style(text) or source_lang
         prompt = FALLBACK_PROMPTS.get(effective_source)
         if prompt is None:
             return None
 
+        async with self._semaphore:
+            raw = await self._backend.generate(text=text, system_instruction=prompt, json_mode=True)
+        if raw is None:
+            return None
         try:
-            async with self._semaphore:
-                response = await self._client.aio.models.generate_content(
-                    model=self._model,
-                    contents=text,
-                    config=types.GenerateContentConfig(
-                        system_instruction=prompt,
-                        response_mime_type="application/json",
-                    ),
-                )
-            raw = (response.text or "").strip()
             data = json.loads(raw)
             translated = str(data.get(target_lang) or "").strip()
             if translated:
                 return translated
             logger.warning(
-                "specialized Gemini translation returned empty source=%s effective_source=%s target=%s — "
+                "specialized translation returned empty source=%s effective_source=%s target=%s — "
                 "trying the other strategy",
                 source_lang, effective_source, target_lang,
             )
-        except Exception:
+        except (json.JSONDecodeError, AttributeError):
             logger.exception(
-                "specialized Gemini translation failed source=%s effective_source=%s target=%s — "
-                "trying the other strategy",
+                "specialized translation returned malformed JSON source=%s effective_source=%s target=%s",
                 source_lang, effective_source, target_lang,
             )
         return None

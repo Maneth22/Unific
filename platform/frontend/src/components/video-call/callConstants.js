@@ -98,6 +98,17 @@ export const TRANSCRIBED_TRACK_ID_ATTR = 'lk.transcribed_track_id'
 export const CHAT_TOPIC = 'lk.chat'
 export const CHAT_TRANSLATED_TOPIC = 'lk.chat.translated'
 
+// Live degradation status for the Translator participant — see
+// app/meeting_room/live_agents/status.py. TRANSLATION_STATUS_TOPIC carries
+// a generic, detail-free {scope, subject, message} to everyone (or just
+// the affected speaker, for scope="speaker"); TRANSLATION_STATUS_DETAIL_TOPIC
+// carries the same plus the raw failure `detail`, sent ONLY to staff
+// identities — TranslatorParticipant.jsx only subscribes to the detail
+// topic when viewerRole==='staff', so a guest/host client never even
+// holds that text in state.
+export const TRANSLATION_STATUS_TOPIC = 'lk.translation_status'
+export const TRANSLATION_STATUS_DETAIL_TOPIC = 'lk.translation_status.detail'
+
 // Display labels for every language code the live_agents STT/TTS provider
 // registry currently knows (backend's settings.live_agents_stt_provider_map
 // keys — see app/meeting_room/live_agents/providers.py), keyed the same

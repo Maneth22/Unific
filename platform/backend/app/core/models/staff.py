@@ -80,9 +80,13 @@ class StaffUser(Base):
 class RefreshToken(Base):
     """A rotating, revocable refresh token. One row per issued token;
     `revoked_at` set on logout, rotation, or reuse detection. Belongs to
-    exactly one of a staff user, a client (org-owner) user, or a client-
-    staff user, so this table is shared across all three login flows
-    rather than duplicated per audience."""
+    exactly one of a staff user, a client (org-owner) user, a client-
+    staff user, or (new in UNIFIC v2) an orgs.OrgUser, so this table is
+    shared across all four login flows rather than duplicated per
+    audience. `org_user_id` gets a real FK (unlike the two legacy
+    client_user_id/client_staff_user_id columns, which predate this and
+    are left as-is) since it's a fresh column with no legacy constraint
+    to preserve."""
 
     __tablename__ = "refresh_token"
     __table_args__ = {"schema": "core"}
@@ -94,6 +98,9 @@ class RefreshToken(Base):
     )
     client_user_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     client_staff_user_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    org_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("orgs.org_user.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     issued_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

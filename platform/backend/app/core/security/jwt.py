@@ -13,7 +13,13 @@ from jwt import InvalidTokenError
 
 from app.config import settings
 
-TokenAudience = Literal["staff", "client", "client_staff"]
+# "org" backs the new orgs.OrgUser login system (UNIFIC v2's flat
+# Org/Group/Member schema, docs/adr/0003) — kept distinct from the
+# legacy "client"/"client_staff" (profiles.ClientUser/ClientStaffUser,
+# untouched) rather than reused, so the two independently-evolving auth
+# systems never share one audience string with disjoint underlying id
+# spaces as an unstated invariant.
+TokenAudience = Literal["staff", "client", "client_staff", "org"]
 
 
 def create_access_token(subject: str, audience: TokenAudience, extra_claims: dict | None = None) -> str:

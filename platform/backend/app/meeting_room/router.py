@@ -26,18 +26,21 @@ from app.core.models.staff import StaffUser
 from app.core.models.webhook_log import WebhookDirection
 from app.core.providers.base import ProviderError
 from app.core.providers.cloud_api_whatsapp import verify_handshake, verify_signature
-from app.core.providers.factory import get_comms_agent, get_reply_generator, get_video_provider, get_whatsapp_provider
 from app.core.rate_limit import limiter
 from app.core.security.dependencies import require_admin, require_any_staff
-from app.core.services import archive_service, scope_service, webhook_log_service
+from app.core.models.tools import ToolSlot
+from app.core.services import archive_service, scope_service, tools_service, webhook_log_service
 from app.database import get_db
 from app.meeting_room import schemas, services
 from app.meeting_room.live_agents import SELECTABLE_LANGUAGES
 from app.meeting_room.models import Conversation, MeetingInviteKind, ReportType, WhatsAppLink
+from app.meeting_room.phone_utils import normalize_phone
 from app.tasking import services as tasking_services
 from app.profiles.models import Identity, Permission
 from app.profiles.security import get_current_client_user
 from app.profiles.services import update_own_permission
+from app.whatsapp import session_store as whatsapp_session_store
+from app.whatsapp.models import PhoneLink as WhatsappPhoneLink
 
 router = APIRouter(prefix="/api/meeting-room", tags=["meeting_room"])
 
@@ -109,20 +112,53 @@ async def inbound_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         if not isinstance(payload, dict) or payload.get("object") != "whatsapp_business_account":
             status_note = "invalid_object"
         else:
-            whatsapp_provider = get_whatsapp_provider()
-            comms_agent = get_comms_agent()
-            reply_generator = get_reply_generator()
+            whatsapp_provider = await tools_service.get_global_tool(db, ToolSlot.whatsapp_send)
 
             parsed = whatsapp_provider.parse_webhook(payload)
             for inbound in parsed:
+                # Idempotency — shared by BOTH pipelines, checked before
+                # either one ever sees the message. Fixes a real,
+                # previously-existing gap (no dedup existed anywhere) in
+                # one place. See app.whatsapp.session_store.
+                first_seen = await whatsapp_session_store.claim_provider_message_id(
+                    inbound.provider_message_id, ttl_seconds=settings.whatsapp_idempotency_ttl_seconds
+                )
+                if not first_seen:
+                    results.append({"status": "duplicate", "provider_message_id": inbound.provider_message_id})
+                    continue
+
+                # Dual-routing dispatch point (UNIFIC v2, see
+                # docs/PHASE_2_NOTES.md): a phone number found in the NEW
+                # whatsapp.phone_link table goes to the new arq-based
+                # pipeline; everything else falls through to the OLD
+                # pipeline below, byte-for-byte unchanged.
+                new_phone = normalize_phone(inbound.from_phone)
+                new_link_result = await db.execute(
+                    select(WhatsappPhoneLink).where(WhatsappPhoneLink.phone_number == new_phone)
+                )
+                if new_link_result.scalar_one_or_none() is not None:
+                    await request.app.state.arq_pool.enqueue_job(
+                        "process_inbound_whatsapp_message",
+                        from_phone=inbound.from_phone,
+                        text=inbound.text,
+                        provider_message_id=inbound.provider_message_id,
+                    )
+                    results.append({"status": "queued", "provider_message_id": inbound.provider_message_id})
+                    continue
+
                 try:
+                    # comms_agent/reply_generator are resolved INSIDE
+                    # receive_inbound_message now, per the message's own
+                    # identity — one webhook payload can carry messages for
+                    # several distinct identities, each with its own
+                    # effective Tools Registry choice; resolving once here
+                    # (before the payload is even parsed) was the wrong
+                    # granularity.
                     result = await orchestrator.receive_inbound_message(
                         db,
                         from_phone=inbound.from_phone,
                         text=inbound.text,
                         provider_message_id=inbound.provider_message_id,
-                        comms_agent=comms_agent,
-                        reply_generator=reply_generator,
                         whatsapp_provider=whatsapp_provider,
                     )
                     results.append({"status": "processed", "identity_id": result.identity_id})
@@ -245,8 +281,7 @@ async def reply_to_conversation(
             text=req.text,
             actor_type=ActorType.staff,
             actor_id=staff.id,
-            comms_agent=get_comms_agent(),
-            whatsapp_provider=get_whatsapp_provider(),
+            whatsapp_provider=await tools_service.get_global_tool(db, ToolSlot.whatsapp_send),
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -288,7 +323,6 @@ async def generate_report(
             db,
             conversation_id=conversation_id,
             report_type=report_type,
-            comms_agent=get_comms_agent(),
             actor_type=ActorType.staff,
             actor_id=staff.id,
         )
@@ -393,8 +427,7 @@ async def client_reply_to_conversation(
             text=req.text,
             actor_type=ActorType.client,
             actor_id=client.id,
-            comms_agent=get_comms_agent(),
-            whatsapp_provider=get_whatsapp_provider(),
+            whatsapp_provider=await tools_service.get_global_tool(db, ToolSlot.whatsapp_send),
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -420,7 +453,6 @@ async def client_generate_report(
             db,
             conversation_id=conversation_id,
             report_type=report_type,
-            comms_agent=get_comms_agent(),
             actor_type=ActorType.client,
             actor_id=client.id,
         )
@@ -521,8 +553,8 @@ async def client_schedule_meeting(
             participant_identity_ids=req.participant_identity_ids,
             meeting_kind="community",
             client_id=client.id,
-            video_provider=get_video_provider(),
-            whatsapp_provider=get_whatsapp_provider(),
+            video_provider=await tools_service.get_global_tool(db, ToolSlot.video_provider),
+            whatsapp_provider=await tools_service.get_global_tool(db, ToolSlot.whatsapp_send),
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -544,7 +576,30 @@ async def client_end_meeting(
         raise HTTPException(status_code=404, detail="Meeting not found")
     await _assert_client_meeting_in_scope(db, client, meeting)
     try:
-        meeting = await services.end_meeting(db, meeting_id=meeting_id, client_id=client.id, video_provider=get_video_provider())
+        meeting = await services.end_meeting(db, meeting_id=meeting_id, client_id=client.id, video_provider=await tools_service.get_global_tool(db, ToolSlot.video_provider))
+    except services.MeetingRoomError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return meeting
+
+
+@client_router.post("/meetings/{meeting_id}/translation/retry", response_model=schemas.MeetingOut)
+async def client_retry_meeting_translation(
+    meeting_id: str,
+    client: ClientUser = Depends(get_current_client_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Same scope check as `client_end_meeting` — any client whose scope
+    covers at least one participant, the existing "host/client" access
+    precedent for meeting-level actions."""
+    meeting = await services.get_meeting_with_participants(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    await _assert_client_meeting_in_scope(db, client, meeting)
+    try:
+        meeting = await services.retry_live_translation(
+            db, meeting_id=meeting_id, actor_type=ActorType.client, actor_id=client.id
+        )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
@@ -563,7 +618,7 @@ async def client_join_meeting(
         raise HTTPException(status_code=403, detail="This identity is outside your account's scope")
     try:
         meeting, token = await services.mint_client_join(
-            db, meeting_id=meeting_id, identity_id=target_identity_id, video_provider=get_video_provider()
+            db, meeting_id=meeting_id, identity_id=target_identity_id, video_provider=await tools_service.get_global_tool(db, ToolSlot.video_provider)
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -597,7 +652,7 @@ async def client_add_meeting_participant(
             identity_id=req.identity_id,
             actor_type=ActorType.client,
             actor_id=client.id,
-            whatsapp_provider=get_whatsapp_provider(),
+            whatsapp_provider=await tools_service.get_global_tool(db, ToolSlot.whatsapp_send),
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -670,7 +725,7 @@ async def public_join_meeting(token: str, db: AsyncSession = Depends(get_db)):
     """Personal (kind=personal), single-recipient invite links only — see
     open_join_meeting below for the meeting-wide open-link equivalent."""
     try:
-        meeting, jwt_token = await services.mint_public_join(db, token=token, video_provider=get_video_provider())
+        meeting, jwt_token = await services.mint_public_join(db, token=token, video_provider=await tools_service.get_global_tool(db, ToolSlot.video_provider))
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
@@ -692,7 +747,7 @@ async def open_join_meeting(
     also throttling personal-link joins under the same budget."""
     try:
         meeting, jwt_token = await services.redeem_open_invite(
-            db, token=token, guest_name=req.guest_name, video_provider=get_video_provider()
+            db, token=token, guest_name=req.guest_name, video_provider=await tools_service.get_global_tool(db, ToolSlot.video_provider)
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -715,6 +770,7 @@ def _join_response(meeting, token: str, *, open_invite_url: str | None = None) -
         meeting_id=meeting.id,
         languages=meeting.translate_languages,
         open_invite_url=open_invite_url,
+        translation_active=meeting.translation_active,
     )
 
 
@@ -745,6 +801,14 @@ async def _meeting_detail_out(db: AsyncSession, meeting) -> schemas.MeetingDetai
     )
 
 
+async def _meeting_staff_detail_out(db: AsyncSession, meeting) -> schemas.MeetingStaffDetailOut:
+    """Staff-only counterpart to `_meeting_detail_out` — same shape plus
+    the raw `translation_error`. Never called from any client-facing
+    route (see MeetingStaffDetailOut's own docstring)."""
+    detail = await _meeting_detail_out(db, meeting)
+    return schemas.MeetingStaffDetailOut(**detail.model_dump(), translation_error=meeting.translation_error)
+
+
 @router.get("/meetings", response_model=list[schemas.MeetingOut])
 async def list_meetings(staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     return await services.list_meetings(db)
@@ -758,12 +822,12 @@ async def list_my_meetings(staff: StaffUser = Depends(require_any_staff), db: As
     return await services.list_staff_meetings(db, staff.id)
 
 
-@router.get("/meetings/{meeting_id}", response_model=schemas.MeetingDetailOut)
+@router.get("/meetings/{meeting_id}", response_model=schemas.MeetingStaffDetailOut)
 async def get_meeting(meeting_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     meeting = await services.get_meeting_with_participants(db, meeting_id)
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
-    return await _meeting_detail_out(db, meeting)
+    return await _meeting_staff_detail_out(db, meeting)
 
 
 @router.get("/meetings/{meeting_id}/chat", response_model=list[schemas.ChatMessageOut])
@@ -788,8 +852,8 @@ async def create_meeting(req: schemas.MeetingCreate, staff: StaffUser = Depends(
             participant_identity_ids=req.participant_identity_ids,
             staff_participant_ids=req.staff_participant_ids,
             meeting_kind=req.meeting_kind,
-            video_provider=get_video_provider(),
-            whatsapp_provider=get_whatsapp_provider(),
+            video_provider=await tools_service.get_global_tool(db, ToolSlot.video_provider),
+            whatsapp_provider=await tools_service.get_global_tool(db, ToolSlot.whatsapp_send),
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -818,7 +882,7 @@ async def join_meeting(meeting_id: str, staff: StaffUser = Depends(require_any_s
     were invited to; scheduling/managing meetings stays admin-only."""
     try:
         meeting, token = await services.mint_staff_join(
-            db, meeting_id=meeting_id, staff_id=staff.id, staff_name=staff.full_name, video_provider=get_video_provider()
+            db, meeting_id=meeting_id, staff_id=staff.id, staff_name=staff.full_name, video_provider=await tools_service.get_global_tool(db, ToolSlot.video_provider)
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -863,7 +927,7 @@ async def add_meeting_participant(
             staff_id=req.staff_user_id,
             actor_type=ActorType.staff,
             actor_id=staff.id,
-            whatsapp_provider=get_whatsapp_provider(),
+            whatsapp_provider=await tools_service.get_global_tool(db, ToolSlot.whatsapp_send),
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -878,7 +942,31 @@ async def add_meeting_participant(
 async def end_meeting(meeting_id: str, staff: StaffUser = Depends(admin), db: AsyncSession = Depends(get_db)):
     try:
         meeting = await services.end_meeting(
-            db, meeting_id=meeting_id, staff_id=staff.id, video_provider=get_video_provider()
+            db, meeting_id=meeting_id, staff_id=staff.id, video_provider=await tools_service.get_global_tool(db, ToolSlot.video_provider)
+        )
+    except services.MeetingRoomError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return meeting
+
+
+@router.post("/meetings/{meeting_id}/translation/retry", response_model=schemas.MeetingOut)
+async def retry_meeting_translation(
+    meeting_id: str, staff: StaffUser = Depends(require_any_staff), db: AsyncSession = Depends(get_db)
+):
+    """Same access shape as `get_my_meeting_chat` above — any staff
+    account that's actually a participant on this meeting, not just
+    admins, since it's the staff member sitting in the call who's most
+    likely to be the one hitting Retry."""
+    meeting = await services.get_meeting_with_participants(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    is_participant = any(p.staff_user_id == staff.id for p in meeting.participants)
+    if not is_participant:
+        raise HTTPException(status_code=403, detail="This meeting is outside your account's scope")
+    try:
+        meeting = await services.retry_live_translation(
+            db, meeting_id=meeting_id, actor_type=ActorType.staff, actor_id=staff.id
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -893,7 +981,7 @@ async def delete_meeting(meeting_id: str, staff: StaffUser = Depends(admin), db:
     or a live one that should be shut down and cleared out, not just ended."""
     try:
         await services.delete_meeting(
-            db, meeting_id=meeting_id, staff_id=staff.id, video_provider=get_video_provider()
+            db, meeting_id=meeting_id, staff_id=staff.id, video_provider=await tools_service.get_global_tool(db, ToolSlot.video_provider)
         )
     except services.MeetingRoomError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
